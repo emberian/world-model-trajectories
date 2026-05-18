@@ -4,15 +4,24 @@
 // only solver. The human never sees SMT — only their sentence + our English
 // render. Each script runs in a fresh Z3 context (hermetic, == the `z3 -in`
 // semantics the crate's native tests verify against).
-import initWasm, { WmtEngine } from './pkg/wmt_core.js';
-import { init as z3Init } from './vendor/z3/z3-solver.bundle.mjs';
+// Per-commit cache-busting: __WMTVER__ is replaced with the short commit
+// SHA by the Pages workflow at deploy time. Mutable assets (this file,
+// the wasm-bindgen glue, our wasm, css) are version-pinned per deploy so a
+// returning visitor never gets a stale app.js against a fresh wasm. The
+// vendored Z3 (34 MB, version-pinned, immutable) is intentionally left
+// un-busted so it stays long-cached. Locally the literal token is a
+// harmless query value the dev server ignores.
+const VER = '__WMTVER__';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
-let engine, Z3, z3ok = false;
+let engine, WmtEngine, Z3, z3ok = false;
 
 async function boot() {
-  await initWasm();
+  const wasmMod = await import(`./pkg/wmt_core.js?v=${VER}`);
+  WmtEngine = wasmMod.WmtEngine;
+  const { init: z3Init } = await import('./vendor/z3/z3-solver.bundle.mjs');
+  await wasmMod.default(`./pkg/wmt_core_bg.wasm?v=${VER}`);
   engine = new WmtEngine();
   try {
     const z = await z3Init();

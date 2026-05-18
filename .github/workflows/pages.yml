@@ -19,6 +19,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      - name: Cache-bust mutable assets with the commit SHA
+        run: |
+          set -euo pipefail
+          V="${GITHUB_SHA::8}"
+          sed -i "s/__WMTVER__/$V/g" site/index.html site/app.js
+          echo "cache-bust version = $V"
+          grep -o "v=$V" site/index.html | head -1
+          grep -o "v=\${VER}\|'$V'" site/app.js | head -1 || true
+          # fail loudly if any token survived (would mean stale caching ships)
+          ! grep -rq '__WMTVER__' site/index.html site/app.js
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

@@ -7,7 +7,7 @@
 <meta name="description" content="Paste your claims to your own LLM, paste a typed logical IR back, and watch the contradictions, the least-entrenchment way out, and the forced consequences of your world-model arise. Real Z3 in the browser. You only ever read plain English. Consistency, not truth." />
 <meta property="og:title" content="world-model trajectories" />
 <meta property="og:description" content="A human + your-own-LLM loop for keeping a set of natural-language claims consistent. Real Z3 (wasm) finds the minimal conflicting claims and the things you never said but are committed to." />
-<link rel="stylesheet" href="style.css" />
+<link rel="stylesheet" href="style.css?v=__WMTVER__" />
 </head>
 <body>
 
@@ -106,6 +106,6 @@
 </footer>
 
 <script src="vendor/z3/z3-built.js"></script>
-<script type="module" src="app.js"></script>
+<script type="module" src="app.js?v=__WMTVER__"></script>
 </body>
 </html>
