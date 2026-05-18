@@ -1,0 +1,29 @@
+# Real-browser end-to-end: load the static site, drive the actual DOM +
+# wasm core + Z3-wasm in headless Chromium, assert the dialectic renders.
+# This is the check that the standing residual demanded — it caught two
+# latent shipped bugs (z3 ESM import shape; COOP/COEP for SAB threads).
+name: e2e (real browser)
+on:
+  push: { branches: [main] }
+  workflow_dispatch: {}
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
+      - name: Install Playwright + Chromium
+        working-directory: e2e
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: Serve the static site
+        run: |
+          python3 -m http.server 8799 --directory site >/tmp/srv.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://localhost:8799/ >/dev/null && break; sleep 1; done
+      - name: Run e2e
+        working-directory: e2e
+        env:
+          BASE: http://localhost:8799/
+        run: node e2e.mjs

@@ -92,11 +92,25 @@ honest UX of the seam.
   hangs on quantifiers; the shipped design is assumption-core +
   Rust-side exact repair, which composes with quantifiers. That finding
   is in the commit history, not hidden.)
-- The browser solver is the official `z3-solver` wasm; it was checked to
-  return **byte-identical** results to that binary on the same scripts.
-- What is *not* independently re-verified here is the static page wiring
-  itself (standard ES-module + a classic `z3-built.js` script that
-  registers the Z3 factory); it is plain, inspectable glue.
+- 12 tests now (added: ground-atom forced consequences; the full
+  coherence-lattice — every minimal conflict, the maximal coherent
+  positions, and the two-independent-conflicts Reiter duality).
+- The browser solver is the official `z3-solver` wasm; checked
+  **byte-identical** to that binary on the same scripts.
+- **The whole stack is now verified in a real headless browser**
+  (`e2e/`, Playwright + Chromium; CI on every push): load the page →
+  Z3 ready → seeded trajectory is coherent with the right forced
+  consequence → add the contradiction → the SVG conflict structure,
+  the maximal positions, the irreducible disagreements, the
+  min-entrenchment repair, and the dialectical claim-colouring all
+  render → adopting the repair restores coherence; zero console/page
+  errors. This closed the standing residual — and on first run it
+  **caught two latent bugs shipped since the first deploy** (the
+  z3-solver ESM import shape, so the in-browser solver had never
+  actually worked; and that z3's wasm is multi-threaded and needs
+  COOP/COEP, fixed with a vendored `coi-serviceworker` shim that works
+  on GitHub Pages). Both are in the commit history, not hidden — the
+  reason real-browser verification is not optional.
 
 First load fetches ~34&nbsp;MB of Z3 wasm, then it is cached. Everything
 runs locally in the tab; nothing is sent anywhere.

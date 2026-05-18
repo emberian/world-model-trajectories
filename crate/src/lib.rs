@@ -517,6 +517,57 @@ CLAIM(S) TO FORMALIZE:\n\
         let _ = self.ingest(demo);
     }
 
+    /// Candidate ground atoms to probe for "you never asserted this but
+    /// are committed to it": every predicate applied to declared constants
+    /// (0-ary funcs) whose sorts match, plus 0-ary propositions. Bounded
+    /// (the demo regime) — honest, not exhaustive over an infinite domain.
+    fn ground_atoms(&self) -> Vec<(String, Formula)> {
+        let mut consts_by_sort: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for f in self.funcs.values() {
+            if f.args.is_empty() {
+                if let Some(ret) = &f.ret {
+                    consts_by_sort.entry(ret.clone()).or_default().push(f.name.clone());
+                }
+            }
+        }
+        let mut out: Vec<(String, Formula)> = Vec::new();
+        for (_, name) in &self.decl_order {
+            let Some(p) = self.preds.get(name) else { continue };
+            if p.args.is_empty() {
+                out.push((p.name.clone(), Formula::Pred { name: p.name.clone(), args: vec![] }));
+                continue;
+            }
+            // cartesian product of matching constants, capped
+            let mut tuples: Vec<Vec<String>> = vec![vec![]];
+            let mut ok = true;
+            for s in &p.args {
+                let cs = consts_by_sort.get(s).cloned().unwrap_or_default();
+                if cs.is_empty() { ok = false; break; }
+                let mut next = Vec::new();
+                for t in &tuples {
+                    for c in &cs {
+                        let mut v = t.clone();
+                        v.push(c.clone());
+                        next.push(v);
+                    }
+                }
+                tuples = next;
+                if tuples.len() > 24 { ok = false; break; }
+            }
+            if !ok { continue; }
+            for tup in tuples {
+                let label = format!("{}({})", p.name, tup.join(", "));
+                let args = tup
+                    .iter()
+                    .map(|c| Term::App { name: c.clone(), args: vec![] })
+                    .collect();
+                out.push((label, Formula::Pred { name: p.name.clone(), args }));
+                if out.len() >= 40 { return out; }
+            }
+        }
+        out
+    }
+
     fn meta(&self) -> serde_json::Value {
         serde_json::json!({
             "claims": self.claims.iter().map(|c| serde_json::json!({
@@ -527,6 +578,11 @@ CLAIM(S) TO FORMALIZE:\n\
             "bool_atoms": self.preds.values()
                 .filter(|p| p.args.is_empty())
                 .map(|p| p.name.clone()).collect::<Vec<_>>(),
+            "ground_atoms": self.ground_atoms().into_iter()
+                .map(|(label, f)| serde_json::json!({
+                    "label": label,
+                    "formula": serde_json::to_value(&f).unwrap(),
+                })).collect::<Vec<_>>(),
         })
     }
 }
@@ -1241,6 +1297,29 @@ mod tests {
             .iter().map(|v| v.as_str().unwrap().to_string()).collect();
         mus.sort();
         assert_eq!(mus, vec!["c_big","c_small"]);
+    }
+
+    #[test]
+    fn ground_atoms_surfaced_and_entailed() {
+        let mut c = Core::default();
+        c.seed_demo();
+        let m = c.meta();
+        let gs = m["ground_atoms"].as_array().unwrap();
+        let labels: Vec<String> = gs
+            .iter()
+            .map(|g| g["label"].as_str().unwrap().to_string())
+            .collect();
+        assert!(labels.iter().any(|l| l == "Flies(tweety)"), "{labels:?}");
+        let f: Formula = serde_json::from_value(
+            gs.iter()
+                .find(|g| g["label"] == "Flies(tweety)")
+                .unwrap()["formula"]
+                .clone(),
+        )
+        .unwrap();
+        if let Some(o) = z3(&c.smt_entails(&f)) {
+            assert_eq!(head(&o), "unsat", "Flies(tweety) must be entailed: {o}");
+        }
     }
 
     #[test]

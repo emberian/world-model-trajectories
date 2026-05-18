@@ -3,10 +3,16 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- Cross-origin isolation for SharedArrayBuffer: z3-solver's wasm is
+     multi-threaded and needs COOP/COEP, which static hosts (GitHub Pages)
+     don't send. This SW shim injects them client-side, then reloads once.
+     Without it the solver dies with "thread constructor failed". -->
+<script src="coi-serviceworker.min.js"></script>
 <title>world-model trajectories — a dialectic instrument</title>
 <meta name="description" content="Hold a set of claims. Your own LLM turns them into a typed logical IR; real Z3 (wasm, in-tab) shows every coherent position they admit, every irreducible disagreement, and the least-entrenchment way out. You only read plain English. Consistency, not truth." />
 <meta property="og:title" content="world-model trajectories" />
 <meta property="og:description" content="Not a contradiction-checker — a dialectic instrument. The full space of coherent positions your claims admit, the irreducible conflicts, and the way out, computed by real Z3 in the browser." />
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231f3a2e'/%3E%3Ctext x='16' y='23' font-size='20' text-anchor='middle' fill='%235b8a5a' font-family='monospace'%3E%E2%8A%A2%3C/text%3E%3C/svg%3E" />
 <link rel="stylesheet" href="style.css?v=__WMTVER__" />
 </head>
 <body>

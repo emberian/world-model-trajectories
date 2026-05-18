@@ -12,7 +12,11 @@ let engine, Z3, z3ok = false;
 
 async function boot() {
   const m = await import(`./pkg/wmt_core.js?v=${VER}`);
-  const { init: z3Init } = await import('./vendor/z3/z3-solver.bundle.mjs');
+  // the z3-solver browser bundle is CJS→ESM: only a default export (the
+  // exports object) — there is no named `init`. (A real-browser headless
+  // test caught this; it had been latently broken.)
+  const z3mod = await import('./vendor/z3/z3-solver.bundle.mjs');
+  const z3Init = (z3mod.default && z3mod.default.init) || z3mod.init;
   await m.default(`./pkg/wmt_core_bg.wasm?v=${VER}`);
   engine = new m.WmtEngine();
   try {
@@ -122,13 +126,20 @@ function svgField(activeIds, muses) {
 }
 
 async function forced() {
-  const atoms = META.bool_atoms || [];
+  // probe 0-ary propositions AND ground atoms (predicates on declared
+  // constants) — "you never asserted this but are committed to it".
+  const probes = [
+    ...(META.bool_atoms || []).map((a) => ({ label: a, formula: { op: 'pred', name: a, args: [] } })),
+    ...(META.ground_atoms || []),
+  ];
   const out = [];
-  for (const a of atoms) {
-    const f = JSON.stringify({ op: 'pred', name: a, args: [] });
-    if (z3head(await run(engine.smt_entails_json(f))) === 'unsat') { out.push([a, true]); continue; }
-    const nf = JSON.stringify({ op: 'not', x: { op: 'pred', name: a, args: [] } });
-    if (z3head(await run(engine.smt_entails_json(nf))) === 'unsat') out.push([a, false]);
+  for (const p of probes) {
+    if (z3head(await run(engine.smt_entails_json(JSON.stringify(p.formula)))) === 'unsat') {
+      out.push([p.label, true]); continue;
+    }
+    if (z3head(await run(engine.smt_entails_json(JSON.stringify({ op: 'not', x: p.formula })))) === 'unsat') {
+      out.push([p.label, false]);
+    }
   }
   return out.length
     ? `<div class="fieldlabel">What you're committed to</div><div class="forced">` +
