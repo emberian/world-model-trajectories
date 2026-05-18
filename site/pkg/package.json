@@ -1,0 +1,17 @@
+{
+  "name": "wmt-core",
+  "type": "module",
+  "description": "World-model-trajectories: a propositional consistency engine for human+LLM semiformalized claim sets. Exact contradiction (minimal conflict) + forced-consequence detection.",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "files": [
+    "wmt_core_bg.wasm",
+    "wmt_core.js",
+    "wmt_core.d.ts"
+  ],
+  "main": "wmt_core.js",
+  "types": "wmt_core.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

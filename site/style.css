@@ -1,0 +1,105 @@
+/* world-model-trajectories — a sibling of the Stella design language.
+   Same palette/type spirit (forest · parchment · lantern), own sheet. */
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500&family=Spectral:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root{
+  --canopy:#1f3a2e; --loam:#3a2a1d; --moss:#5b8a5a; --fern:#9bb87a;
+  --bark:#8a6a47; --parchment:#f3ead6; --cream:#faf6ea; --moonlight:#cdd9e0;
+  --twilight:#2a3a55; --lantern:#d99a3f; --mushroom:#b9534a; --ink:#2a2620;
+  --bg:var(--parchment); --card:var(--cream);
+  --fg:var(--ink); --fg2:color-mix(in oklab,var(--ink) 68%,var(--parchment));
+  --fg3:color-mix(in oklab,var(--ink) 46%,var(--parchment));
+  --border:color-mix(in oklab,var(--ink) 14%,transparent);
+  --border-strong:color-mix(in oklab,var(--ink) 26%,transparent);
+  --display:'Cormorant Garamond',Georgia,serif;
+  --body:'Spectral','Source Serif Pro',Georgia,serif;
+  --mono:'JetBrains Mono',ui-monospace,Menlo,monospace;
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--body);
+  font-size:17px;line-height:1.55;-webkit-font-smoothing:antialiased}
+a{color:var(--moss)} a:hover{color:color-mix(in oklab,var(--moss) 80%,var(--ink))}
+code,kbd,pre{font-family:var(--mono);font-size:.86em}
+.wrap{max-width:1080px;margin:0 auto;padding:0 28px}
+
+.nav{display:flex;align-items:center;gap:18px;padding:14px 28px;
+  background:color-mix(in oklab,var(--canopy) 96%,black);color:var(--parchment)}
+.nav .mark{width:24px;height:24px;border-radius:50%;background:var(--moss);
+  display:grid;place-items:center;color:var(--canopy);font-weight:600}
+.nav b{font-family:var(--display);font-size:1.15rem;letter-spacing:.01em}
+.nav .sub{color:color-mix(in oklab,var(--parchment) 70%,var(--canopy));
+  font-size:.82rem;margin-left:6px}
+.nav .right{margin-left:auto;font-size:.82rem;
+  color:color-mix(in oklab,var(--parchment) 75%,var(--canopy))}
+
+header.hero{background:
+  radial-gradient(120% 80% at 80% -10%,color-mix(in oklab,var(--lantern) 22%,transparent),transparent 60%),
+  linear-gradient(180deg,var(--cream),var(--parchment));
+  border-bottom:1px solid var(--border)}
+.hero .wrap{padding:56px 28px 44px}
+.eyebrow{font-family:var(--mono);font-size:.74rem;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--bark)}
+h1{font-family:var(--display);font-weight:600;font-size:clamp(2.1rem,5vw,3.4rem);
+  line-height:1.1;margin:.32em 0 .28em}
+h1 em{font-style:italic;color:var(--moss)}
+.lede{font-size:1.16rem;color:var(--fg2);max-width:64ch}
+.lede strong{color:var(--fg)}
+
+section{padding:30px 0;border-bottom:1px solid var(--border)}
+h2{font-family:var(--display);font-weight:600;font-size:1.7rem;margin:.2em 0 .1em}
+.subhead{color:var(--fg3);margin:.1em 0 1.1em;font-style:italic}
+
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:22px}
+@media(max-width:900px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;
+  padding:18px 18px}
+.card h3{font-family:var(--display);font-size:1.25rem;margin:.1em 0 .5em}
+.step{font-family:var(--mono);font-size:.72rem;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--bark)}
+
+textarea,input[type=text]{width:100%;font-family:var(--mono);font-size:.82rem;
+  background:#fffdf6;color:var(--ink);border:1px solid var(--border-strong);
+  border-radius:8px;padding:10px;resize:vertical}
+textarea{min-height:120px}
+.btn{font-family:var(--body);font-size:.95rem;border:1px solid var(--border-strong);
+  background:var(--moss);color:var(--cream);padding:8px 16px;border-radius:8px;
+  cursor:pointer;font-weight:600}
+.btn:hover{background:color-mix(in oklab,var(--moss) 86%,var(--ink))}
+.btn.warm{background:var(--lantern);color:var(--canopy)}
+.btn.ghost{background:transparent;color:var(--fg);border-color:var(--border-strong)}
+.btn.sm{font-size:.8rem;padding:4px 10px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
+
+.status{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);
+  font-size:.8rem;padding:6px 12px;border-radius:999px;border:1px solid var(--border-strong)}
+.status.ok{background:color-mix(in oklab,var(--moss) 18%,var(--parchment));color:var(--canopy)}
+.status.bad{background:color-mix(in oklab,var(--mushroom) 20%,var(--parchment));color:#7a2f28}
+.status.warn{background:color-mix(in oklab,var(--lantern) 22%,var(--parchment));color:var(--loam)}
+.status.muted{color:var(--fg3)}
+
+.claim{border:1px solid var(--border);border-radius:10px;padding:10px 12px;
+  margin:8px 0;background:#fffdf6}
+.claim.inactive{opacity:.5}
+.claim.conflict{border-color:var(--mushroom);
+  box-shadow:0 0 0 2px color-mix(in oklab,var(--mushroom) 30%,transparent)}
+.claim .src{font-style:italic;color:var(--fg)}
+.claim .smt{font-family:var(--mono);font-size:.76rem;color:var(--fg3);
+  margin-top:4px;word-break:break-word}
+.claim .id{font-family:var(--mono);font-size:.72rem;color:var(--bark)}
+.chip{font-family:var(--mono);font-size:.7rem;padding:2px 8px;border-radius:999px;
+  border:1px solid var(--border-strong);color:var(--fg2)}
+.forced{font-family:var(--mono);font-size:.82rem;background:
+  color-mix(in oklab,var(--lantern) 14%,var(--parchment));
+  border:1px dashed var(--bark);border-radius:8px;padding:8px 12px;margin:6px 0}
+.errbox{font-family:var(--mono);font-size:.8rem;white-space:pre-wrap;
+  background:color-mix(in oklab,var(--mushroom) 14%,var(--parchment));
+  border:1px solid var(--mushroom);border-radius:8px;padding:10px;margin:8px 0}
+.muted{color:var(--fg3)} .small{font-size:.86rem}
+.seam{background:color-mix(in oklab,var(--twilight) 8%,var(--parchment));
+  border-left:3px solid var(--twilight);padding:10px 16px;margin:10px 0;
+  border-radius:0 8px 8px 0}
+footer{padding:34px 0 60px;color:var(--fg3);font-size:.88rem}
+.kbd{font-family:var(--mono);font-size:.78rem;background:var(--cream);
+  border:1px solid var(--border-strong);border-radius:5px;padding:1px 6px}

@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>world-model trajectories — a consistency loop</title>
+<meta name="description" content="Paste your claims to your own LLM, paste the SMT-LIB2 back, and watch the contradictions and forced consequences of your world-model arise. Real Z3 in the browser. The goal is consistency, not truth." />
+<meta property="og:title" content="world-model trajectories" />
+<meta property="og:description" content="A human + your-own-LLM loop for keeping a set of natural-language claims consistent. Real Z3 (wasm) finds the minimal conflicting claims and the things you never said but are committed to." />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<nav class="nav">
+  <span class="mark">⊢</span>
+  <b>world-model trajectories</b>
+  <span class="sub">a consistency loop · after stella</span>
+  <span class="right" id="z3status">booting Z3…</span>
+</nav>
+
+<header class="hero">
+  <div class="wrap">
+    <p class="eyebrow">human + your own LLM · real Z3 in the browser · consistency, not truth</p>
+    <h1>Keep your world-model<br><em>honest with itself</em>.</h1>
+    <p class="lede">
+      You hold a set of natural-language claims. This tool does <strong>not</strong>
+      parse them — <em>you</em> paste its prompt into whatever LLM you like, the LLM
+      returns a strict SMT-LIB2 formalization, you paste that back. Then a real
+      solver (Z3, compiled to wasm, running entirely in this tab) tells you the
+      <strong>smallest set of your claims that can't all be true</strong>, and the
+      things you <strong>never asserted but are now committed to</strong>. The
+      copy-paste round-trip <em>is</em> the seam where natural language meets logic —
+      surfaced on purpose, never hidden. Goal: consistency, not truth.
+    </p>
+    <div class="row">
+      <button class="btn warm" id="seedBtn">Load the penguin demo</button>
+      <a class="btn ghost" href="#how">How it works</a>
+      <a class="btn ghost" href="https://github.com/emberian/world-model-trajectories">Source</a>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+
+<section id="trajectory">
+  <h2>The trajectory</h2>
+  <p class="subhead">Every claim you've formalized. Retract one to resolve a conflict — the selection is yours (AGM-style); consistency is recomputed by Z3, not asserted.</p>
+  <div id="statusLine"><span class="status muted">no claims yet</span></div>
+  <div id="claims"></div>
+  <div id="forced"></div>
+  <details style="margin-top:14px"><summary class="muted small">atom / declaration registry</summary>
+    <div id="registry" class="small"></div></details>
+</section>
+
+<section id="loop">
+  <div class="grid">
+    <div class="card">
+      <div class="step">Step 1 — formalize with your LLM</div>
+      <h3>Claim → prompt</h3>
+      <p class="small muted">Type one or more natural-language claims. Build the prompt, copy it, paste it into your LLM (it already contains your current registry so the LLM reuses your symbols).</p>
+      <textarea id="nl" placeholder="e.g.  A penguin cannot fly.&#10;Every penguin is a bird."></textarea>
+      <div class="row">
+        <button class="btn" id="promptBtn">Build prompt</button>
+        <button class="btn ghost sm" id="copyBtn">Copy</button>
+      </div>
+      <textarea id="prompt" readonly placeholder="the prompt to paste into your LLM appears here"></textarea>
+    </div>
+    <div class="card">
+      <div class="step">Step 2 — paste the formalization back</div>
+      <h3>JSON → trajectory</h3>
+      <p class="small muted">Paste exactly the JSON your LLM returned. Bad symbols / malformed SMT are surfaced verbatim from Z3 — never silently guessed.</p>
+      <textarea id="json" placeholder='{"decls":[…],"claims":[…]}'></textarea>
+      <div class="row"><button class="btn" id="ingestBtn">Ingest &amp; check</button></div>
+      <div id="errs"></div>
+    </div>
+  </div>
+</section>
+
+<section id="ask">
+  <h2>Ask your world a question</h2>
+  <p class="subhead">An SMT-LIB2 term. "Does everything I've said force this?" — entailment, by Z3.</p>
+  <div class="row" style="flex-wrap:nowrap">
+    <input type="text" id="query" placeholder="(=> Penguin (not Flies))" />
+    <button class="btn" id="askBtn">Ask</button>
+  </div>
+  <div id="askOut" class="small"></div>
+</section>
+
+<section id="how">
+  <h2>What this is — and what it is not</h2>
+  <div class="seam"><strong>The seam is the point.</strong> Three places this is honest about, none hidden:
+    <ol class="small">
+      <li><b>NL → SMT-LIB2 faithfulness</b> is done by you + your LLM, in the open, by copy-paste. The tool guarantees consistency <em>of the formalization</em>, never that the formalization faithfully captures your sentence. That is yours to confirm — cheaply, in the loop.</li>
+      <li><b>Z3 can answer <span class="kbd">unknown</span></b> on hard quantified fragments. When it does, it says so. It is not silently treated as "consistent".</li>
+      <li><b>Registry discipline</b> (reuse a symbol, don't mint a synonym) is enforced by Z3's own type-checker: a bad symbol surfaces as Z3's verbatim error, not a guess.</li>
+    </ol>
+    The goal is <em>consistency, not truth</em>: the tool never claims your claims are right — only whether they can all hold at once, which is the smallest, and the only fully-mechanizable, part of the problem.</div>
+  <p class="small muted">Engine: a Rust core (<code>wmt-core</code>, wasm) owns the registry, the trajectory, AGM selection, and SMT assembly — it does not solve. The solver is Z3 4.16 (wasm), running in this tab; the same SMT-LIB2 is verified end-to-end against the native Z3 binary in the crate's test suite. First load fetches ~34&nbsp;MB of Z3 wasm (then cached).</p>
+</section>
+
+</main>
+
+<footer class="wrap">
+  world-model-trajectories · built for a question from <a href="https://twitter.com/bananawalnutz">@bananawalnutz</a> ·
+  a sibling of <a href="https://github.com/emberian">stella / svenvs</a> · MIT/Apache-2.0 ·
+  Z3 © Microsoft (MIT).
+</footer>
+
+<script src="vendor/z3/z3-built.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
