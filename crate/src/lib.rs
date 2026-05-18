@@ -756,13 +756,14 @@ impl Driver {
 pub struct WmtEngine {
     core: Core,
     drv: Option<Driver>,
+    lat: Option<Lattice>,
 }
 
 #[wasm_bindgen]
 impl WmtEngine {
     #[wasm_bindgen(constructor)]
     pub fn new() -> WmtEngine {
-        WmtEngine { core: Core::default(), drv: None }
+        WmtEngine { core: Core::default(), drv: None, lat: None }
     }
     pub fn ingest(&mut self, json: &str) -> String {
         let (ok, errors) = self.core.ingest(json);
@@ -817,6 +818,204 @@ impl WmtEngine {
             .map(|d| d.result().to_string())
             .unwrap_or_else(|| "{}".into())
     }
+
+    // ---- full coherence-lattice driver -----------------------------------
+    // Every minimal conflict (MUS) and every maximal coherent position
+    // (MSS) the active claims admit. Same step-machine contract as the
+    // analysis driver; native tests pump it with the z3 binary, the
+    // browser with z3-wasm.
+    pub fn lattice_begin(&mut self) {
+        self.lat = Some(Lattice::new(&self.core));
+    }
+    pub fn lattice_next(&self) -> String {
+        self.lat
+            .as_ref()
+            .and_then(|l| l.next_script(&self.core))
+            .unwrap_or_default()
+    }
+    pub fn lattice_feed(&mut self, z3_out: &str) {
+        if let Some(l) = self.lat.as_mut() {
+            l.feed(z3_out);
+        }
+    }
+    pub fn lattice_result(&self) -> String {
+        self.lat
+            .as_ref()
+            .map(|l| l.result().to_string())
+            .unwrap_or_else(|| "{}".into())
+    }
+}
+
+// ---- full coherence lattice ----------------------------------------------
+// Enumerate ALL minimal conflicts (MUSes) by increasing-size subset search
+// with superset pruning — correct because, processing sizes ascending and
+// skipping any candidate that already contains a found MUS, an unsatisfiable
+// candidate that survives pruning has no unsatisfiable proper subset, i.e.
+// it IS minimal. Maximal coherent positions (MSSes) and the ways out
+// (MCSes) follow by Reiter/Liffiton–Sakallah duality: MCS = the minimal
+// hitting sets of the MUS collection; MSS = its complement. Exact for the
+// demo regime; capped (the UI falls back to the single-conflict driver for
+// large sets, stated honestly, never silently truncated).
+
+const LAT_CAP: usize = 10;
+
+fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
+    let mut res = Vec::new();
+    if k == 0 || k > n {
+        return res;
+    }
+    let mut idx: Vec<usize> = (0..k).collect();
+    loop {
+        res.push(idx.clone());
+        let mut i = k;
+        loop {
+            if i == 0 {
+                return res;
+            }
+            i -= 1;
+            if idx[i] < i + n - k {
+                idx[i] += 1;
+                for j in i + 1..k {
+                    idx[j] = idx[j - 1] + 1;
+                }
+                break;
+            }
+        }
+    }
+}
+
+fn minimal_hitting_sets(sets: &[Vec<String>], universe: &[String]) -> Vec<Vec<String>> {
+    if sets.is_empty() {
+        return Vec::new();
+    }
+    let n = universe.len();
+    let mut found: Vec<Vec<String>> = Vec::new();
+    for size in 1..=n {
+        for cmb in combinations(n, size) {
+            let cand: Vec<String> = cmb.iter().map(|&i| universe[i].clone()).collect();
+            let hits = sets.iter().all(|s| s.iter().any(|e| cand.contains(e)));
+            if !hits {
+                continue;
+            }
+            let minimal = !found.iter().any(|f| f.iter().all(|e| cand.contains(e)));
+            if minimal {
+                found.push(cand);
+            }
+        }
+    }
+    found
+}
+
+#[derive(Default, Serialize)]
+struct LatOut {
+    consistent: bool,
+    capped: bool,
+    mus: Vec<Vec<String>>,
+    mcs: Vec<Vec<String>>,
+    mss: Vec<Vec<String>>,
+    done: bool,
+}
+
+struct Lattice {
+    active: Vec<String>,
+    capped: bool,
+    queue: Vec<Vec<String>>,
+    qi: usize,
+    muses: Vec<Vec<String>>,
+    out: LatOut,
+}
+
+impl Lattice {
+    fn new(core: &Core) -> Lattice {
+        let active = core.active_ids();
+        let n = active.len();
+        let capped = n > LAT_CAP;
+        let mut queue = Vec::new();
+        if !capped {
+            for size in 1..=n {
+                for cmb in combinations(n, size) {
+                    queue.push(cmb.iter().map(|&i| active[i].clone()).collect());
+                }
+            }
+        }
+        let mut l = Lattice {
+            active,
+            capped,
+            queue,
+            qi: 0,
+            muses: Vec::new(),
+            out: LatOut { capped, ..Default::default() },
+        };
+        if capped {
+            l.out.done = true;
+        } else {
+            l.prepare();
+        }
+        l
+    }
+    fn prepare(&mut self) {
+        while self.qi < self.queue.len() {
+            let c = &self.queue[self.qi];
+            let pruned = self
+                .muses
+                .iter()
+                .any(|m| m.iter().all(|x| c.contains(x)));
+            if pruned {
+                self.qi += 1;
+            } else {
+                return;
+            }
+        }
+        self.finalize();
+    }
+    fn next_script(&self, core: &Core) -> Option<String> {
+        if self.out.done || self.qi >= self.queue.len() {
+            None
+        } else {
+            Some(core.smt_assume(&self.queue[self.qi]))
+        }
+    }
+    fn feed(&mut self, out: &str) {
+        if self.out.done || self.qi >= self.queue.len() {
+            return;
+        }
+        let h = z3_head(out);
+        if h.starts_with("unsat") {
+            let mus = self.queue[self.qi].clone();
+            self.muses.push(mus);
+        }
+        // sat / unknown: not a (minimal) conflict at this subset
+        self.qi += 1;
+        self.prepare();
+    }
+    fn finalize(&mut self) {
+        if self.muses.is_empty() {
+            self.out.consistent = true;
+            self.out.mus = Vec::new();
+            self.out.mcs = Vec::new();
+            self.out.mss = vec![self.active.clone()];
+        } else {
+            self.out.consistent = false;
+            self.out.mus = self.muses.clone();
+            self.out.mcs = minimal_hitting_sets(&self.muses, &self.active);
+            self.out.mss = self
+                .out
+                .mcs
+                .iter()
+                .map(|m| {
+                    self.active
+                        .iter()
+                        .filter(|x| !m.contains(x))
+                        .cloned()
+                        .collect()
+                })
+                .collect();
+        }
+        self.out.done = true;
+    }
+    fn result(&self) -> serde_json::Value {
+        serde_json::to_value(&self.out).unwrap_or_else(|_| serde_json::json!({}))
+    }
 }
 
 impl Default for WmtEngine {
@@ -855,6 +1054,113 @@ mod tests {
             assert!(guard < 200, "driver did not terminate");
         }
         d.result()
+    }
+
+    /// Drive the full coherence-lattice step-machine with the z3 binary.
+    fn lattice(c: &Core) -> serde_json::Value {
+        let mut l = Lattice::new(c);
+        let mut guard = 0;
+        while let Some(script) = l.next_script(c) {
+            let o = match z3(&script) {
+                Some(o) => o,
+                None => return serde_json::json!({"skip": true}),
+            };
+            l.feed(&o);
+            guard += 1;
+            assert!(guard < 4096, "lattice did not terminate");
+        }
+        l.result()
+    }
+
+    fn as_sets(v: &serde_json::Value) -> Vec<Vec<String>> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|s| {
+                let mut x: Vec<String> = s
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|e| e.as_str().unwrap().to_string())
+                    .collect();
+                x.sort();
+                x
+            })
+            .collect()
+    }
+
+    #[test]
+    fn lattice_consistent_one_position() {
+        let mut c = Core::default();
+        c.seed_demo();
+        let r = lattice(&c);
+        if r.get("skip").is_some() {
+            return;
+        }
+        assert_eq!(r["consistent"], true);
+        assert!(r["mus"].as_array().unwrap().is_empty());
+        let mss = as_sets(&r["mss"]);
+        assert_eq!(mss.len(), 1, "one coherent position = everything");
+        assert_eq!(mss[0].len(), 3);
+    }
+
+    #[test]
+    fn lattice_penguin_single_mus_four_positions() {
+        let mut c = Core::default();
+        c.seed_demo();
+        c.ingest(
+            r#"{"claims":[{"id":"c_pen_nofly","weight":1,
+              "formula":{"op":"forall","vars":[{"name":"x","sort":"Thing"}],
+                "body":{"op":"imp",
+                  "a":{"op":"pred","name":"Penguin","args":[{"t":"var","name":"x"}]},
+                  "b":{"op":"not","x":{"op":"pred","name":"Flies","args":[{"t":"var","name":"x"}]}}}}}]}"#,
+        );
+        let r = lattice(&c);
+        if r.get("skip").is_some() {
+            return;
+        }
+        assert_eq!(r["consistent"], false);
+        let mus = as_sets(&r["mus"]);
+        assert_eq!(mus.len(), 1, "one irreducible disagreement");
+        assert_eq!(mus[0].len(), 4);
+        let mcs = as_sets(&r["mcs"]);
+        assert_eq!(mcs.len(), 4, "four ways out (drop any one)");
+        assert!(mcs.iter().all(|m| m.len() == 1));
+        let mss = as_sets(&r["mss"]);
+        assert_eq!(mss.len(), 4, "four maximal coherent positions");
+        assert!(mss.iter().all(|p| p.len() == 3));
+    }
+
+    #[test]
+    fn lattice_two_independent_conflicts_duality() {
+        // {P, ¬P} and {Q, ¬Q}: two MUSes; MCS = minimal hitting sets =
+        // {one of each pair} → 4 correction sets of size 2; 4 positions.
+        let mut c = Core::default();
+        c.ingest(
+            r#"{"preds":[{"name":"P","args":[],"gloss":"p"},{"name":"Q","args":[],"gloss":"q"}],
+              "claims":[
+               {"id":"c_p","formula":{"op":"pred","name":"P","args":[]}},
+               {"id":"c_np","formula":{"op":"not","x":{"op":"pred","name":"P","args":[]}}},
+               {"id":"c_q","formula":{"op":"pred","name":"Q","args":[]}},
+               {"id":"c_nq","formula":{"op":"not","x":{"op":"pred","name":"Q","args":[]}}}]}"#,
+        );
+        let r = lattice(&c);
+        if r.get("skip").is_some() {
+            return;
+        }
+        assert_eq!(r["consistent"], false);
+        let mut mus = as_sets(&r["mus"]);
+        mus.sort();
+        assert_eq!(
+            mus,
+            vec![
+                vec!["c_np".to_string(), "c_p".to_string()],
+                vec!["c_nq".to_string(), "c_q".to_string()]
+            ]
+        );
+        let mcs = as_sets(&r["mcs"]);
+        assert_eq!(mcs.len(), 4, "4 minimal hitting sets: {mcs:?}");
+        assert!(mcs.iter().all(|m| m.len() == 2));
     }
 
     #[test]

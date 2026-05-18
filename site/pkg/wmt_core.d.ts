@@ -9,6 +9,10 @@ export class WmtEngine {
     analyze_next(): string;
     analyze_result(): string;
     ingest(json: string): string;
+    lattice_begin(): void;
+    lattice_feed(z3_out: string): void;
+    lattice_next(): string;
+    lattice_result(): string;
     meta(): string;
     constructor();
     prompt(nl: string): string;
@@ -32,6 +36,10 @@ export interface InitOutput {
     readonly wmtengine_analyze_next: (a: number) => [number, number];
     readonly wmtengine_analyze_result: (a: number) => [number, number];
     readonly wmtengine_ingest: (a: number, b: number, c: number) => [number, number];
+    readonly wmtengine_lattice_begin: (a: number) => void;
+    readonly wmtengine_lattice_feed: (a: number, b: number, c: number) => void;
+    readonly wmtengine_lattice_next: (a: number) => [number, number];
+    readonly wmtengine_lattice_result: (a: number) => [number, number];
     readonly wmtengine_meta: (a: number) => [number, number];
     readonly wmtengine_new: () => number;
     readonly wmtengine_prompt: (a: number, b: number, c: number) => [number, number];

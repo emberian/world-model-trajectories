@@ -70,6 +70,47 @@ export class WmtEngine {
             wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
         }
     }
+    lattice_begin() {
+        wasm.wmtengine_lattice_begin(this.__wbg_ptr);
+    }
+    /**
+     * @param {string} z3_out
+     */
+    lattice_feed(z3_out) {
+        const ptr0 = passStringToWasm0(z3_out, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wmtengine_lattice_feed(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
+     * @returns {string}
+     */
+    lattice_next() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wmtengine_lattice_next(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    lattice_result() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wmtengine_lattice_result(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
     /**
      * @returns {string}
      */
