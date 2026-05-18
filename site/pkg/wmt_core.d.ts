@@ -4,9 +4,10 @@
 export class WmtEngine {
     free(): void;
     [Symbol.dispose](): void;
-    /**
-     * Ingest pasted JSON. `{ok, errors, meta}`.
-     */
+    analyze_begin(): void;
+    analyze_feed(z3_out: string): void;
+    analyze_next(): string;
+    analyze_result(): string;
     ingest(json: string): string;
     meta(): string;
     constructor();
@@ -15,18 +16,10 @@ export class WmtEngine {
     remove(id: string): string;
     retract(id: string): string;
     seed_demo(): string;
-    /**
-     * Clean sat/unsat/unknown check (run first).
-     */
+    set_weight(id: string, w: bigint): string;
     smt_check(): string;
-    /**
-     * SMT-LIB2 with `get-unsat-core` (run only when smt_check is unsat).
-     */
-    smt_consistency(): string;
-    /**
-     * SMT-LIB2 to test whether the active set entails `term`.
-     */
-    smt_entails(term: string): string;
+    smt_core(): string;
+    smt_entails_json(formula_json: string): string;
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -34,6 +27,10 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_wmtengine_free: (a: number, b: number) => void;
+    readonly wmtengine_analyze_begin: (a: number) => void;
+    readonly wmtengine_analyze_feed: (a: number, b: number, c: number) => void;
+    readonly wmtengine_analyze_next: (a: number) => [number, number];
+    readonly wmtengine_analyze_result: (a: number) => [number, number];
     readonly wmtengine_ingest: (a: number, b: number, c: number) => [number, number];
     readonly wmtengine_meta: (a: number) => [number, number];
     readonly wmtengine_new: () => number;
@@ -42,9 +39,10 @@ export interface InitOutput {
     readonly wmtengine_remove: (a: number, b: number, c: number) => [number, number];
     readonly wmtengine_retract: (a: number, b: number, c: number) => [number, number];
     readonly wmtengine_seed_demo: (a: number) => [number, number];
+    readonly wmtengine_set_weight: (a: number, b: number, c: number, d: bigint) => [number, number];
     readonly wmtengine_smt_check: (a: number) => [number, number];
-    readonly wmtengine_smt_consistency: (a: number) => [number, number];
-    readonly wmtengine_smt_entails: (a: number, b: number, c: number) => [number, number];
+    readonly wmtengine_smt_core: (a: number) => [number, number];
+    readonly wmtengine_smt_entails_json: (a: number, b: number, c: number) => [number, number];
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

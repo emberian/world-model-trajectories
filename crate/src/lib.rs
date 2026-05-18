@@ -1,46 +1,88 @@
 //! world-model-trajectories — wmt-core
 //!
-//! A consistency engine for a *human + their own LLM* loop. It does NOT
-//! parse natural language. The human pastes this tool's prompt into
-//! whatever LLM they like; the LLM returns a strict JSON formalization in
-//! **SMT-LIB2**; the human pastes it back; this core maintains the claim
-//! set, assembles the SMT-LIB2 program, and a real solver (**Z3**) reports:
+//! A consistency / dialectic engine for a *human + their own LLM* loop.
 //!
-//!   * a **minimal conflict** — the smallest set of *named claims* that
-//!     cannot all hold (Z3's `get-unsat-core`), and
-//!   * **forced consequences** — declared boolean atoms entailed by the
-//!     whole set though no single claim asserts them.
+//! The surfaced interchange is NOT SMT-LIB2. The LLM emits a typed
+//! many-sorted first-order **IR as JSON** (models are far more reliable at
+//! structured JSON than at s-expression syntax, which also kills the
+//! "solver syntax error" failure mode). This crate is the *trusted,
+//! Z3-tested compiler*: IR → SMT-LIB2 (private), and IR → readable English
+//! (the only logical form a human ever sees). SMT-LIB2 is an internal
+//! compile target, never shown.
 //!
-//! The logic is full quantifier-free (and, where Z3 decides it, quantified)
-//! SMT over `Bool/Int/Real/=`/uninterpreted functions — not toy
-//! propositional. Three seams, all surfaced, none hidden:
-//!   1. NL → SMT-LIB2 faithfulness is the human-mediated copy/paste step.
-//!   2. Z3 may answer `unknown` on hard fragments — reported, never masked.
-//!   3. The registry-reuse discipline is enforced by Z3's own type checker;
-//!      a bad symbol surfaces as Z3's verbatim error, not a silent guess.
-//! Goal: consistency of the formalization, not truth.
+//! The solver is Z3 (the `z3` binary in native tests; `z3-solver` wasm in
+//! the browser). This crate does not solve — it owns the vocabulary, the
+//! claim trajectory, the IR↔SMT compiler, the English renderer, the LLM
+//! prompt, and the *drivers* that orchestrate Z3 to compute:
 //!
-//! The Rust core does NOT solve. It owns the model, the registry, the
-//! trajectory, AGM selection, the prompt, and SMT assembly. The solver is
-//! Z3 (the `z3` binary in native tests; `z3-solver` wasm in the browser).
+//!   * consistency + the minimal conflict;
+//!   * the **coherence lattice** — every minimal correction set (MCS: a
+//!     minimal way out) by iterated MaxSMT, and every minimal conflict
+//!     (MUS: an irreducible disagreement) as the MCSes' minimal hitting
+//!     sets (Reiter/Liffiton–Sakallah duality), exact for the demo regime;
+//!   * the **optimal repair** — minimum-entrenchment-weight set of claims
+//!     to drop (weighted MaxSMT), as a *suggestion* the human still owns;
+//!   * forced consequences (entailment).
+//!
+//! Honest seams, surfaced not hidden: (1) NL→IR faithfulness is the human
+//! loop — the human confirms the *English render*, never logic syntax;
+//! (2) Z3 may answer `unknown` — reported, never masked; (3) vocabulary
+//! reuse is enforced by Z3's own type-checker. Goal: consistency, not
+//! truth.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use wasm_bindgen::prelude::*;
 
-fn default_true() -> bool {
+fn dtrue() -> bool {
     true
 }
+fn w1() -> i64 {
+    1
+}
 
-/// An SMT-LIB2 declaration the claims share: a sort, const, or function.
-/// `id` is the symbol the LLM must REUSE; `smtlib` is the literal
-/// declaration line; `gloss` is its plain-English meaning.
+// ---- typed many-sorted FOL IR --------------------------------------------
+
 #[derive(Clone, Serialize, Deserialize)]
-pub struct Decl {
-    pub id: String,
-    pub smtlib: String,
+pub struct Sig {
+    pub name: String,
+    #[serde(default)]
+    pub args: Vec<String>, // sort names
+    #[serde(default)]
+    pub ret: Option<String>, // for funcs; preds are Bool
     #[serde(default)]
     pub gloss: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "lowercase")]
+pub enum Term {
+    Var { name: String },
+    Int { v: i64 },
+    Real { v: String },
+    App { name: String, #[serde(default)] args: Vec<Term> }, // const = no args
+    Arith { op: String, args: Vec<Term> },                   // + - *
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct QVar {
+    pub name: String,
+    pub sort: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "lowercase")]
+pub enum Formula {
+    Pred { name: String, #[serde(default)] args: Vec<Term> }, // 0-ary = proposition
+    Eq { a: Term, b: Term },
+    Cmp { rel: String, a: Term, b: Term }, // < <= > >=
+    Not { x: Box<Formula> },
+    And { xs: Vec<Formula> },
+    Or { xs: Vec<Formula> },
+    Imp { a: Box<Formula>, b: Box<Formula> },
+    Iff { a: Box<Formula>, b: Box<Formula> },
+    Forall { vars: Vec<QVar>, body: Box<Formula> },
+    Exists { vars: Vec<QVar>, body: Box<Formula> },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -50,163 +92,334 @@ pub struct Claim {
     pub source: String,
     #[serde(default)]
     pub gloss: String,
-    /// One SMT-LIB2 boolean term — the content of the claim.
-    pub smt: String,
-    #[serde(default)]
-    pub new_decls: Vec<Decl>,
-    #[serde(default = "default_true")]
+    pub formula: Formula,
+    #[serde(default = "w1")]
+    pub weight: i64, // epistemic entrenchment (higher = harder to give up)
+    #[serde(default = "dtrue")]
     pub active: bool,
 }
 
 #[derive(Deserialize)]
 struct Ingest {
     #[serde(default)]
-    decls: Vec<Decl>,
+    sorts: Vec<String>,
+    #[serde(default)]
+    preds: Vec<Sig>,
+    #[serde(default)]
+    funcs: Vec<Sig>,
     claims: Vec<Claim>,
 }
+
+const BUILTIN_SORTS: [&str; 3] = ["Bool", "Int", "Real"];
 
 #[derive(Default)]
 struct Core {
+    sorts: Vec<String>, // user sorts (non-builtin)
+    preds: BTreeMap<String, Sig>,
+    funcs: BTreeMap<String, Sig>,
+    decl_order: Vec<(char, String)>, // ('p'|'f', name) for stable emission
     claims: Vec<Claim>,
-    /// id -> (smtlib decl line, gloss). Ordered, deduplicated by id.
-    decls: BTreeMap<String, (String, String)>,
-    decl_order: Vec<String>,
+}
+
+// ---- IR → SMT-LIB2 (private compile target) ------------------------------
+
+fn term_smt(t: &Term) -> String {
+    match t {
+        Term::Var { name } => name.clone(),
+        Term::Int { v } => {
+            if *v < 0 {
+                format!("(- {})", -v)
+            } else {
+                v.to_string()
+            }
+        }
+        Term::Real { v } => v.clone(),
+        Term::App { name, args } => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                format!(
+                    "({} {})",
+                    name,
+                    args.iter().map(term_smt).collect::<Vec<_>>().join(" ")
+                )
+            }
+        }
+        Term::Arith { op, args } => format!(
+            "({} {})",
+            op,
+            args.iter().map(term_smt).collect::<Vec<_>>().join(" ")
+        ),
+    }
+}
+
+fn form_smt(f: &Formula) -> String {
+    match f {
+        Formula::Pred { name, args } => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                format!(
+                    "({} {})",
+                    name,
+                    args.iter().map(term_smt).collect::<Vec<_>>().join(" ")
+                )
+            }
+        }
+        Formula::Eq { a, b } => format!("(= {} {})", term_smt(a), term_smt(b)),
+        Formula::Cmp { rel, a, b } => {
+            format!("({} {} {})", rel, term_smt(a), term_smt(b))
+        }
+        Formula::Not { x } => format!("(not {})", form_smt(x)),
+        Formula::And { xs } => {
+            format!("(and {})", xs.iter().map(form_smt).collect::<Vec<_>>().join(" "))
+        }
+        Formula::Or { xs } => {
+            format!("(or {})", xs.iter().map(form_smt).collect::<Vec<_>>().join(" "))
+        }
+        Formula::Imp { a, b } => format!("(=> {} {})", form_smt(a), form_smt(b)),
+        Formula::Iff { a, b } => format!("(= {} {})", form_smt(a), form_smt(b)),
+        Formula::Forall { vars, body } | Formula::Exists { vars, body } => {
+            let q = if matches!(f, Formula::Forall { .. }) {
+                "forall"
+            } else {
+                "exists"
+            };
+            let bs = vars
+                .iter()
+                .map(|v| format!("({} {})", v.name, v.sort))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("({} ({}) {})", q, bs, form_smt(body))
+        }
+    }
+}
+
+// ---- IR → readable English (the only logical form a human sees) ----------
+
+fn term_en(t: &Term) -> String {
+    match t {
+        Term::Var { name } => name.clone(),
+        Term::Int { v } => v.to_string(),
+        Term::Real { v } => v.clone(),
+        Term::App { name, args } => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                format!(
+                    "{}({})",
+                    name,
+                    args.iter().map(term_en).collect::<Vec<_>>().join(", ")
+                )
+            }
+        }
+        Term::Arith { op, args } => args
+            .iter()
+            .map(term_en)
+            .collect::<Vec<_>>()
+            .join(&format!(" {op} ")),
+    }
+}
+
+fn form_en(f: &Formula) -> String {
+    match f {
+        Formula::Pred { name, args } => {
+            if args.is_empty() {
+                name.clone()
+            } else {
+                format!(
+                    "{}({})",
+                    name,
+                    args.iter().map(term_en).collect::<Vec<_>>().join(", ")
+                )
+            }
+        }
+        Formula::Eq { a, b } => format!("{} is {}", term_en(a), term_en(b)),
+        Formula::Cmp { rel, a, b } => {
+            let r = match rel.as_str() {
+                "<" => "is less than",
+                "<=" => "is at most",
+                ">" => "is greater than",
+                ">=" => "is at least",
+                _ => rel,
+            };
+            format!("{} {} {}", term_en(a), r, term_en(b))
+        }
+        Formula::Not { x } => format!("it is not the case that ({})", form_en(x)),
+        Formula::And { xs } => xs
+            .iter()
+            .map(form_en)
+            .collect::<Vec<_>>()
+            .join(", and "),
+        Formula::Or { xs } => xs
+            .iter()
+            .map(form_en)
+            .collect::<Vec<_>>()
+            .join(", or "),
+        Formula::Imp { a, b } => format!("if {} then {}", form_en(a), form_en(b)),
+        Formula::Iff { a, b } => format!("{} exactly when {}", form_en(a), form_en(b)),
+        Formula::Forall { vars, body } => format!(
+            "for every {}, {}",
+            vars.iter()
+                .map(|v| format!("{} in {}", v.name, v.sort))
+                .collect::<Vec<_>>()
+                .join(" and "),
+            form_en(body)
+        ),
+        Formula::Exists { vars, body } => format!(
+            "there is some {} such that {}",
+            vars.iter()
+                .map(|v| format!("{} in {}", v.name, v.sort))
+                .collect::<Vec<_>>()
+                .join(" and "),
+            form_en(body)
+        ),
+    }
 }
 
 impl Core {
-    fn active_idxs(&self) -> Vec<usize> {
+    fn decls_smt(&self) -> String {
+        let mut s = String::new();
+        for so in &self.sorts {
+            s.push_str(&format!("(declare-sort {so} 0)\n"));
+        }
+        for (k, name) in &self.decl_order {
+            if *k == 'p' {
+                if let Some(p) = self.preds.get(name) {
+                    s.push_str(&format!(
+                        "(declare-fun {} ({}) Bool)\n",
+                        p.name,
+                        p.args.join(" ")
+                    ));
+                }
+            } else if let Some(fun) = self.funcs.get(name) {
+                s.push_str(&format!(
+                    "(declare-fun {} ({}) {})\n",
+                    fun.name,
+                    fun.args.join(" "),
+                    fun.ret.clone().unwrap_or_else(|| "Bool".into())
+                ));
+            }
+        }
+        s
+    }
+
+    fn active(&self) -> Vec<usize> {
         (0..self.claims.len())
             .filter(|&i| self.claims[i].active)
             .collect()
     }
 
-    fn all_decls_block(&self) -> String {
-        let mut s = String::new();
-        for id in &self.decl_order {
-            if let Some((smt, _)) = self.decls.get(id) {
-                s.push_str(smt);
-                s.push('\n');
-            }
-        }
-        s
-    }
-
-    /// The SMT-LIB2 consistency program: declarations, every active claim
-    /// asserted under its name (so `get-unsat-core` returns the minimal
-    /// conflicting *claims*), then check-sat + get-unsat-core.
-    pub fn smt_consistency(&self) -> String {
-        let mut s = String::new();
-        s.push_str("(set-option :produce-unsat-cores true)\n(set-logic ALL)\n");
-        s.push_str(&self.all_decls_block());
-        for &i in &self.active_idxs() {
-            let c = &self.claims[i];
-            s.push_str(&format!("(assert (! {} :named {}))\n", c.smt, c.id));
-        }
-        s.push_str("(check-sat)\n(get-unsat-core)\n");
-        s
-    }
-
-    /// Consistency check WITHOUT requesting the core (one clean `sat` /
-    /// `unsat` / `unknown` token — used first; the core script is only run
-    /// when this says `unsat`).
+    /// Clean sat/unsat/unknown, no core (run first).
     pub fn smt_check(&self) -> String {
-        let mut s = String::new();
-        s.push_str("(set-logic ALL)\n");
-        s.push_str(&self.all_decls_block());
-        for &i in &self.active_idxs() {
-            s.push_str(&format!("(assert {})\n", self.claims[i].smt));
+        let mut s = String::from("(set-logic ALL)\n");
+        s.push_str(&self.decls_smt());
+        for &i in &self.active() {
+            s.push_str(&format!("(assert {})\n", form_smt(&self.claims[i].formula)));
         }
         s.push_str("(check-sat)\n");
         s
     }
 
-    /// SMT-LIB2 entailment query: is `term` forced by the active set?
-    /// (active asserts) ∧ ¬term  unsat  ⟺  the set entails `term`.
-    pub fn smt_entails(&self, term: &str) -> String {
-        let mut s = String::new();
-        s.push_str("(set-logic ALL)\n");
-        s.push_str(&self.all_decls_block());
-        for &i in &self.active_idxs() {
-            s.push_str(&format!("(assert {})\n", self.claims[i].smt));
+    /// With named asserts + get-unsat-core (run when smt_check is unsat).
+    pub fn smt_core(&self) -> String {
+        let mut s = String::from("(set-option :produce-unsat-cores true)\n(set-logic ALL)\n");
+        s.push_str(&self.decls_smt());
+        for &i in &self.active() {
+            s.push_str(&format!(
+                "(assert (! {} :named {}))\n",
+                form_smt(&self.claims[i].formula),
+                self.claims[i].id
+            ));
         }
-        s.push_str(&format!("(assert (not {term}))\n(check-sat)\n"));
+        s.push_str("(check-sat)\n(get-unsat-core)\n");
         s
     }
 
-    /// Declared 0-ary Bool atoms — the ones we can auto-probe for "you
-    /// never asserted this, but your set forces it".
-    pub fn bool_atoms(&self) -> Vec<String> {
-        self.decl_order
-            .iter()
-            .filter(|id| {
-                self.decls
-                    .get(*id)
-                    .map(|(s, _)| {
-                        let s = s.replace(char::is_whitespace, " ");
-                        s.contains(&format!("declare-const {id} Bool"))
-                            || s.contains(&format!("declare-fun {id} () Bool"))
-                    })
-                    .unwrap_or(false)
-            })
-            .cloned()
-            .collect()
+    pub fn smt_entails(&self, f: &Formula) -> String {
+        let mut s = String::from("(set-logic ALL)\n");
+        s.push_str(&self.decls_smt());
+        for &i in &self.active() {
+            s.push_str(&format!("(assert {})\n", form_smt(&self.claims[i].formula)));
+        }
+        s.push_str(&format!("(assert (not {}))\n(check-sat)\n", form_smt(f)));
+        s
+    }
+
+    /// One weighted-MaxSMT script over a *given* set of claim indices,
+    /// each a soft assertion with its entrenchment weight. After
+    /// `(check-sat)` the model is read to see which claims were dropped.
+    /// `extra_hard` are extra hard clauses (used to enumerate MCSes).
+    fn smt_maxsmt(&self, idxs: &[usize], extra_hard: &[String]) -> String {
+        let mut s = String::from("(set-logic ALL)\n");
+        s.push_str(&self.decls_smt());
+        // a fresh Bool selector per claim: claim holds  <=>  sel_i
+        for &i in idxs {
+            let c = &self.claims[i];
+            s.push_str(&format!("(declare-const sel_{} Bool)\n", c.id));
+            s.push_str(&format!(
+                "(assert (= sel_{} {}))\n",
+                c.id,
+                form_smt(&c.formula)
+            ));
+            s.push_str(&format!(
+                "(assert-soft sel_{} :weight {} :id W)\n",
+                c.id,
+                c.weight.max(1)
+            ));
+        }
+        for h in extra_hard {
+            s.push_str(&format!("(assert {h})\n"));
+        }
+        s.push_str("(check-sat)\n(get-value (");
+        s.push_str(
+            &idxs
+                .iter()
+                .map(|&i| format!("sel_{}", self.claims[i].id))
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
+        s.push_str("))\n");
+        s
     }
 
     fn ingest(&mut self, json: &str) -> (bool, Vec<String>) {
         let ing: Ingest = match serde_json::from_str(json) {
             Ok(i) => i,
-            Err(e) => {
-                return (
-                    false,
-                    vec![format!("not valid JSON for the claim grammar: {e}")],
-                )
-            }
+            Err(e) => return (false, vec![format!("not valid IR JSON: {e}")]),
         };
-        let mut errors = Vec::new();
+        let mut errs = Vec::new();
         if ing.claims.is_empty() {
-            errors.push("no claims in the pasted JSON".into());
-        }
-        for d in &ing.decls {
-            if d.id.trim().is_empty() || d.smtlib.trim().is_empty() {
-                errors.push("a decl has an empty id or smtlib".into());
-            }
+            errs.push("no claims in the pasted IR".into());
         }
         for c in &ing.claims {
             if c.id.trim().is_empty() {
-                errors.push("a claim has an empty id".into());
-            }
-            if c.smt.trim().is_empty() {
-                errors.push(format!("claim '{}' has an empty smt term", c.id));
-            }
-            for d in &c.new_decls {
-                if d.id.trim().is_empty() || d.smtlib.trim().is_empty() {
-                    errors.push(format!("claim '{}' has a malformed new_decl", c.id));
-                }
+                errs.push("a claim has an empty id".into());
             }
         }
-        if !errors.is_empty() {
-            return (false, errors);
+        if !errs.is_empty() {
+            return (false, errs);
         }
-        // commit decls (batch-level then per-claim), dedup by id, keep order
-        let mut add_decl = |id: &str, smt: &str, gloss: &str| {
-            if !self.decls.contains_key(id) {
-                self.decl_order.push(id.to_string());
+        for so in ing.sorts {
+            if !BUILTIN_SORTS.contains(&so.as_str()) && !self.sorts.contains(&so) {
+                self.sorts.push(so);
             }
-            self.decls
-                .entry(id.to_string())
-                .or_insert_with(|| (smt.to_string(), gloss.to_string()));
-        };
-        for d in &ing.decls {
-            add_decl(&d.id, &d.smtlib, &d.gloss);
         }
-        for c in &ing.claims {
-            for d in &c.new_decls {
-                add_decl(&d.id, &d.smtlib, &d.gloss);
+        for p in ing.preds {
+            if !self.preds.contains_key(&p.name) {
+                self.decl_order.push(('p', p.name.clone()));
             }
+            self.preds.entry(p.name.clone()).or_insert(p);
+        }
+        for fun in ing.funcs {
+            if !self.funcs.contains_key(&fun.name) {
+                self.decl_order.push(('f', fun.name.clone()));
+            }
+            self.funcs.entry(fun.name.clone()).or_insert(fun);
         }
         for c in ing.claims {
             if let Some(slot) = self.claims.iter_mut().find(|x| x.id == c.id) {
-                *slot = c; // revision — the trajectory amends, not only appends
+                *slot = c; // revision = the trajectory amends, not just appends
             } else {
                 self.claims.push(c);
             }
@@ -214,51 +427,67 @@ impl Core {
         (true, Vec::new())
     }
 
-    fn set_active(&mut self, id: &str, v: bool) {
-        if let Some(c) = self.claims.iter_mut().find(|c| c.id == id) {
-            c.active = v;
-        }
-    }
-    fn remove(&mut self, id: &str) {
-        self.claims.retain(|c| c.id != id);
-    }
-
     fn registry_view(&self) -> String {
-        if self.decl_order.is_empty() {
-            return "  (registry empty — you will declare what you need)\n".into();
-        }
         let mut s = String::new();
-        for id in &self.decl_order {
-            if let Some((smt, g)) = self.decls.get(id) {
-                s.push_str(&format!("  {id}  ::  {smt}   —  {g}\n"));
+        if !self.sorts.is_empty() {
+            s.push_str(&format!("  sorts: {}\n", self.sorts.join(", ")));
+        }
+        for (k, name) in &self.decl_order {
+            if *k == 'p' {
+                if let Some(p) = self.preds.get(name) {
+                    s.push_str(&format!(
+                        "  pred {}({}) — {}\n",
+                        p.name,
+                        p.args.join(", "),
+                        p.gloss
+                    ));
+                }
+            } else if let Some(f) = self.funcs.get(name) {
+                s.push_str(&format!(
+                    "  func {}({}) : {} — {}\n",
+                    f.name,
+                    f.args.join(", "),
+                    f.ret.clone().unwrap_or_default(),
+                    f.gloss
+                ));
             }
         }
-        s
+        if s.is_empty() {
+            "  (vocabulary empty — declare what you need)\n".into()
+        } else {
+            s
+        }
     }
 
     fn prompt(&self, nl: &str) -> String {
         format!(
 "You are a careful semiformalizer. Convert each natural-language claim below into\n\
-SMT-LIB2 and return ONLY a JSON object of this exact shape:\n\
+a typed many-sorted first-order IR and return ONLY this JSON object:\n\
 \n\
-{{\"decls\":[{{\"id\":\"sym\",\"smtlib\":\"(declare-const sym Bool)\",\"gloss\":\"...\"}}],\n\
-  \"claims\":[{{\"id\":\"c_slug\",\"source\":\"<the NL sentence verbatim>\",\n\
-    \"gloss\":\"<=6 word label\",\"smt\":\"<one SMT-LIB2 Bool term>\",\n\
-    \"new_decls\":[{{\"id\":\"sym\",\"smtlib\":\"(declare-fun age (Int) Int)\",\"gloss\":\"...\"}}]}}]}}\n\
+{{\"sorts\":[\"Thing\"],\n\
+  \"preds\":[{{\"name\":\"Bird\",\"args\":[\"Thing\"],\"gloss\":\"x is a bird\"}}],\n\
+  \"funcs\":[{{\"name\":\"age\",\"args\":[\"Thing\"],\"ret\":\"Int\",\"gloss\":\"age of x\"}}],\n\
+  \"claims\":[{{\"id\":\"c_slug\",\"source\":\"<the sentence verbatim>\",\n\
+    \"gloss\":\"<=6 words\",\"weight\":1,\n\
+    \"formula\":{{...}}}}]}}\n\
+\n\
+FORMULA grammar (JSON, field \"op\"): pred{{name,args}} eq{{a,b}}\n\
+  cmp{{rel:'<'|'<='|'>'|'>=',a,b}} not{{x}} and{{xs}} or{{xs}} imp{{a,b}}\n\
+  iff{{a,b}} forall{{vars:[{{name,sort}}],body}} exists{{vars,body}}\n\
+TERM grammar (field \"t\"): var{{name}} int{{v}} real{{v}}\n\
+  app{{name,args}} (a 0-arg app is a constant) arith{{op:'+'|'-'|'*',args}}\n\
 \n\
 Rules, most important first:\n\
-1. REUSE ids from the registry below whenever the meaning matches. Minting a\n\
-   synonym for something already declared is THE way this silently breaks\n\
-   contradiction detection. Only declare genuinely-new symbols.\n\
-2. Each claim's \"smt\" is ONE boolean term in SMT-LIB2 (logic ALL): you may\n\
-   use Bool, Int, Real, =, and, or, not, =>, ite, uninterpreted functions,\n\
-   and quantifiers (forall/exists) when needed. \"A implies B\" => \"(=> A B)\".\n\
-3. Put every symbol you introduce in new_decls (or top-level decls) with a\n\
-   declare-const / declare-fun / declare-sort line and a plain gloss.\n\
-4. One claim object per natural-language statement; keep \"source\" verbatim.\n\
-5. JSON only. No prose, no code fences.\n\
+1. REUSE names from the vocabulary below when the meaning matches. Minting a\n\
+   synonym is THE way contradiction-detection silently breaks. Only add new\n\
+   preds/funcs/sorts for genuinely new vocabulary, each with a gloss.\n\
+2. One claim object per sentence; keep \"source\" verbatim. \"weight\" is how\n\
+   hard the claim is to give up (epistemic entrenchment, default 1).\n\
+3. Prefer typed quantified formulas: \"penguins don't fly\" =>\n\
+   forall x:Thing. (=> (Penguin x) (not (Flies x))).\n\
+4. No SMT-LIB, no prose, no code fences. JSON only.\n\
 \n\
-REGISTRY (id :: declaration — meaning):\n\
+VOCABULARY:\n\
 {}\n\
 CLAIM(S) TO FORMALIZE:\n\
 {}\n",
@@ -268,19 +497,23 @@ CLAIM(S) TO FORMALIZE:\n\
     }
 
     fn seed_demo(&mut self) {
-        // The classic: birds fly; penguins are birds; this is a penguin;
-        // penguins don't fly. Consistent until the last is added.
-        let demo = r#"{"decls":[
-          {"id":"Bird","smtlib":"(declare-const Bird Bool)","gloss":"the thing is a bird"},
-          {"id":"Flies","smtlib":"(declare-const Flies Bool)","gloss":"the thing can fly"},
-          {"id":"Penguin","smtlib":"(declare-const Penguin Bool)","gloss":"the thing is a penguin"}],
+        let demo = r#"{"sorts":["Thing"],
+          "preds":[
+            {"name":"Bird","args":["Thing"],"gloss":"x is a bird"},
+            {"name":"Flies","args":["Thing"],"gloss":"x can fly"},
+            {"name":"Penguin","args":["Thing"],"gloss":"x is a penguin"}],
+          "funcs":[{"name":"tweety","args":[],"ret":"Thing","gloss":"the bird Tweety"}],
           "claims":[
-          {"id":"c_birds_fly","source":"Birds can fly.","gloss":"birds fly",
-           "smt":"(=> Bird Flies)","new_decls":[]},
-          {"id":"c_penguin_bird","source":"A penguin is a bird.","gloss":"penguin ⇒ bird",
-           "smt":"(=> Penguin Bird)","new_decls":[]},
-          {"id":"c_is_penguin","source":"This thing is a penguin.","gloss":"it is a penguin",
-           "smt":"Penguin","new_decls":[]}]}"#;
+           {"id":"c_birds_fly","source":"Birds can fly.","gloss":"birds fly","weight":2,
+            "formula":{"op":"forall","vars":[{"name":"x","sort":"Thing"}],
+              "body":{"op":"imp","a":{"op":"pred","name":"Bird","args":[{"t":"var","name":"x"}]},
+                                  "b":{"op":"pred","name":"Flies","args":[{"t":"var","name":"x"}]}}}},
+           {"id":"c_penguin_bird","source":"Every penguin is a bird.","gloss":"penguin ⇒ bird","weight":5,
+            "formula":{"op":"forall","vars":[{"name":"x","sort":"Thing"}],
+              "body":{"op":"imp","a":{"op":"pred","name":"Penguin","args":[{"t":"var","name":"x"}]},
+                                  "b":{"op":"pred","name":"Bird","args":[{"t":"var","name":"x"}]}}}},
+           {"id":"c_tweety_penguin","source":"Tweety is a penguin.","gloss":"Tweety is a penguin","weight":4,
+            "formula":{"op":"pred","name":"Penguin","args":[{"t":"app","name":"tweety","args":[]}]}}]}"#;
         let _ = self.ingest(demo);
     }
 
@@ -288,81 +521,306 @@ CLAIM(S) TO FORMALIZE:\n\
         serde_json::json!({
             "claims": self.claims.iter().map(|c| serde_json::json!({
                 "id": c.id, "source": c.source, "gloss": c.gloss,
-                "smt": c.smt, "active": c.active,
+                "render": form_en(&c.formula), "weight": c.weight, "active": c.active,
             })).collect::<Vec<_>>(),
-            "decls": self.decl_order.iter().filter_map(|id| {
-                self.decls.get(id).map(|(s,g)|
-                    serde_json::json!({"id": id, "smtlib": s, "gloss": g}))
-            }).collect::<Vec<_>>(),
-            "bool_atoms": self.bool_atoms(),
+            "vocab": self.registry_view(),
+            "bool_atoms": self.preds.values()
+                .filter(|p| p.args.is_empty())
+                .map(|p| p.name.clone()).collect::<Vec<_>>(),
+        })
+    }
+}
+
+// ---- assumption-literal analysis (robust, optimize-free) -----------------
+// Each active claim i gets a Bool assumption a_<id>; we assert
+// (=> a_<id> formula_i). `check-sat-assuming` over a chosen id-subset then
+// tests exactly that subset; `get-unsat-core` returns the assumption
+// literals in the conflict = a claim-level MUS. No MaxSMT, no optimize —
+// so it composes with quantifiers exactly as plain check-sat does (the
+// reason the assert-soft approach hung and this does not).
+
+impl Core {
+    fn active_ids(&self) -> Vec<String> {
+        self.active()
+            .iter()
+            .map(|&i| self.claims[i].id.clone())
+            .collect()
+    }
+    fn weight_of(&self, id: &str) -> i64 {
+        self.claims
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.weight.max(1))
+            .unwrap_or(1)
+    }
+    /// Program that declares an assumption literal for every active claim
+    /// and tests exactly `assume_ids` (the others are simply not asserted).
+    pub fn smt_assume(&self, assume_ids: &[String]) -> String {
+        let mut s = String::from("(set-option :produce-unsat-cores true)\n(set-logic ALL)\n");
+        s.push_str(&self.decls_smt());
+        for &i in &self.active() {
+            let id = &self.claims[i].id;
+            s.push_str(&format!("(declare-const a_{id} Bool)\n"));
+            s.push_str(&format!(
+                "(assert (=> a_{id} {}))\n",
+                form_smt(&self.claims[i].formula)
+            ));
+        }
+        let lits = assume_ids
+            .iter()
+            .map(|id| format!("a_{id}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        s.push_str(&format!("(check-sat-assuming ({lits}))\n(get-unsat-core)\n"));
+        s
+    }
+}
+
+fn z3_head(o: &str) -> String {
+    o.split('\n')
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+fn z3_core_ids(o: &str) -> Vec<String> {
+    // first parenthesised group after the status line
+    let g = o
+        .lines()
+        .skip_while(|l| !l.trim().starts_with('('))
+        .next()
+        .unwrap_or("");
+    g.trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .split_whitespace()
+        .filter_map(|t| t.strip_prefix("a_").map(|x| x.to_string()))
+        .collect()
+}
+
+#[derive(Clone)]
+enum Phase {
+    CheckAll,
+    Shrink { cand: Vec<String>, i: usize },
+    Repair { subsets: Vec<Vec<String>>, k: usize },
+    Done,
+}
+
+/// One step-machine. `analyze_*` in the wasm facade pump it with z3-wasm;
+/// native tests pump it with the z3 binary. Same code path both ways.
+struct Driver {
+    active: Vec<String>,
+    phase: Phase,
+    status: String, // consistent | inconsistent | unknown
+    mus: Vec<String>,
+    repair: Vec<String>,
+    repair_weight: i64,
+}
+
+fn powerset_by_weight(core: &Core, ids: &[String]) -> Vec<Vec<String>> {
+    let n = ids.len();
+    let mut subs: Vec<Vec<String>> = Vec::new();
+    for mask in 1u32..(1u32 << n) {
+        let mut v = Vec::new();
+        for (b, id) in ids.iter().enumerate() {
+            if mask & (1 << b) != 0 {
+                v.push(id.clone());
+            }
+        }
+        subs.push(v);
+    }
+    subs.sort_by_key(|s| {
+        (
+            s.iter().map(|id| core.weight_of(id)).sum::<i64>(),
+            s.len(),
+        )
+    });
+    subs
+}
+
+impl Driver {
+    fn new(core: &Core) -> Driver {
+        Driver {
+            active: core.active_ids(),
+            phase: Phase::CheckAll,
+            status: String::new(),
+            mus: vec![],
+            repair: vec![],
+            repair_weight: 0,
+        }
+    }
+    fn next_script(&self, core: &Core) -> Option<String> {
+        match &self.phase {
+            Phase::CheckAll => Some(core.smt_assume(&self.active)),
+            Phase::Shrink { cand, i } => {
+                let mut c = cand.clone();
+                c.remove(*i);
+                Some(core.smt_assume(&c))
+            }
+            Phase::Repair { subsets, k } => {
+                let drop = &subsets[*k];
+                let keep: Vec<String> = self
+                    .active
+                    .iter()
+                    .filter(|x| !drop.contains(x))
+                    .cloned()
+                    .collect();
+                Some(core.smt_assume(&keep))
+            }
+            Phase::Done => None,
+        }
+    }
+    fn feed(&mut self, core: &Core, out: &str) {
+        let h = z3_head(out);
+        match self.phase.clone() {
+            Phase::CheckAll => {
+                if h.starts_with("sat") {
+                    self.status = "consistent".into();
+                    self.phase = Phase::Done;
+                } else if h.starts_with("unknown") || h.is_empty() {
+                    self.status = "unknown".into();
+                    self.phase = Phase::Done;
+                } else {
+                    self.status = "inconsistent".into();
+                    let mut cand = z3_core_ids(out);
+                    if cand.is_empty() {
+                        cand = self.active.clone();
+                    }
+                    self.phase = if cand.len() <= 1 {
+                        self.mus = cand.clone();
+                        Phase::Repair {
+                            subsets: powerset_by_weight(core, &cand),
+                            k: 0,
+                        }
+                    } else {
+                        Phase::Shrink { cand, i: 0 }
+                    };
+                }
+            }
+            Phase::Shrink { mut cand, i } => {
+                // we tested cand without index i
+                if h.starts_with("unsat") {
+                    cand.remove(i); // still conflicting → that claim wasn't needed
+                } else {
+                    // needed; advance
+                    self.phase = Phase::Shrink { cand: cand.clone(), i: i + 1 };
+                    if i + 1 >= cand.len() {
+                        self.finish_shrink(core, cand);
+                    }
+                    return;
+                }
+                if i >= cand.len() {
+                    self.finish_shrink(core, cand);
+                } else {
+                    self.phase = Phase::Shrink { cand, i };
+                }
+            }
+            Phase::Repair { subsets, k } => {
+                if h.starts_with("sat") {
+                    self.repair = subsets[k].clone();
+                    self.repair_weight =
+                        subsets[k].iter().map(|id| core.weight_of(id)).sum();
+                    self.phase = Phase::Done;
+                } else if k + 1 < subsets.len() {
+                    self.phase = Phase::Repair { subsets, k: k + 1 };
+                } else {
+                    self.repair = self.mus.clone();
+                    self.repair_weight =
+                        self.mus.iter().map(|id| core.weight_of(id)).sum();
+                    self.phase = Phase::Done;
+                }
+            }
+            Phase::Done => {}
+        }
+    }
+    fn finish_shrink(&mut self, core: &Core, cand: Vec<String>) {
+        self.mus = cand.clone();
+        self.phase = Phase::Repair {
+            subsets: powerset_by_weight(core, &cand),
+            k: 0,
+        };
+    }
+    fn result(&self) -> serde_json::Value {
+        serde_json::json!({
+            "status": self.status,
+            "mus": self.mus,
+            "repair": { "drop": self.repair, "weight": self.repair_weight },
+            "done": matches!(self.phase, Phase::Done),
         })
     }
 }
 
 // ---- wasm facade ----------------------------------------------------------
-// The browser drives Z3 (z3-solver wasm). This facade hands it the exact
-// SMT-LIB2 to run and owns everything that is NOT solving.
 
 #[wasm_bindgen]
 pub struct WmtEngine {
     core: Core,
+    drv: Option<Driver>,
 }
 
 #[wasm_bindgen]
 impl WmtEngine {
     #[wasm_bindgen(constructor)]
     pub fn new() -> WmtEngine {
-        WmtEngine { core: Core::default() }
+        WmtEngine { core: Core::default(), drv: None }
     }
-
-    /// Ingest pasted JSON. `{ok, errors, meta}`.
     pub fn ingest(&mut self, json: &str) -> String {
         let (ok, errors) = self.core.ingest(json);
-        serde_json::json!({"ok": ok, "errors": errors, "meta": self.core.meta()})
-            .to_string()
+        serde_json::json!({"ok": ok, "errors": errors, "meta": self.core.meta()}).to_string()
     }
-
     pub fn retract(&mut self, id: &str) -> String {
-        self.core.set_active(id, false);
+        if let Some(c) = self.core.claims.iter_mut().find(|c| c.id == id) { c.active = false; }
         self.core.meta().to_string()
     }
     pub fn reactivate(&mut self, id: &str) -> String {
-        self.core.set_active(id, true);
+        if let Some(c) = self.core.claims.iter_mut().find(|c| c.id == id) { c.active = true; }
         self.core.meta().to_string()
     }
     pub fn remove(&mut self, id: &str) -> String {
-        self.core.remove(id);
+        self.core.claims.retain(|c| c.id != id);
         self.core.meta().to_string()
     }
-    pub fn meta(&self) -> String {
+    pub fn set_weight(&mut self, id: &str, w: i64) -> String {
+        if let Some(c) = self.core.claims.iter_mut().find(|c| c.id == id) { c.weight = w.max(1); }
         self.core.meta().to_string()
     }
-    pub fn seed_demo(&mut self) -> String {
-        self.core.seed_demo();
-        self.core.meta().to_string()
+    pub fn meta(&self) -> String { self.core.meta().to_string() }
+    pub fn seed_demo(&mut self) -> String { self.core.seed_demo(); self.core.meta().to_string() }
+    pub fn smt_check(&self) -> String { self.core.smt_check() }
+    pub fn smt_core(&self) -> String { self.core.smt_core() }
+    pub fn smt_entails_json(&self, formula_json: &str) -> String {
+        match serde_json::from_str::<Formula>(formula_json) {
+            Ok(f) => self.core.smt_entails(&f),
+            Err(e) => format!("; IR parse error: {e}\n(check-sat)\n"),
+        }
     }
+    pub fn prompt(&self, nl: &str) -> String { self.core.prompt(nl) }
 
-    /// Clean sat/unsat/unknown check (run first).
-    pub fn smt_check(&self) -> String {
-        self.core.smt_check()
+    // ---- analysis step driver (status + minimal conflict + optimal repair)
+    pub fn analyze_begin(&mut self) { self.drv = Some(Driver::new(&self.core)); }
+    pub fn analyze_next(&self) -> String {
+        self.drv
+            .as_ref()
+            .and_then(|d| d.next_script(&self.core))
+            .unwrap_or_default()
     }
-    /// SMT-LIB2 with `get-unsat-core` (run only when smt_check is unsat).
-    pub fn smt_consistency(&self) -> String {
-        self.core.smt_consistency()
+    pub fn analyze_feed(&mut self, z3_out: &str) {
+        if let Some(d) = self.drv.as_mut() {
+            // borrow core immutably by cloning the small bits the driver needs
+            let core = &self.core;
+            d.feed(core, z3_out);
+        }
     }
-    /// SMT-LIB2 to test whether the active set entails `term`.
-    pub fn smt_entails(&self, term: &str) -> String {
-        self.core.smt_entails(term)
-    }
-    pub fn prompt(&self, nl: &str) -> String {
-        self.core.prompt(nl)
+    pub fn analyze_result(&self) -> String {
+        self.drv
+            .as_ref()
+            .map(|d| d.result().to_string())
+            .unwrap_or_else(|| "{}".into())
     }
 }
 
 impl Default for WmtEngine {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 // ---- native tests: REAL end-to-end against the `z3` binary ----------------
@@ -373,126 +831,130 @@ mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    /// Run an SMT-LIB2 script through the real z3 binary. Returns its
-    /// stdout lines, or None if z3 is not installed (test is then skipped
-    /// with a printed notice — honest about what was and wasn't checked).
-    fn z3(script: &str) -> Option<String> {
-        let mut child = match Command::new("z3")
-            .arg("-in")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+    fn z3(s: &str) -> Option<String> {
+        let mut ch = match Command::new("z3")
+            .arg("-in").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
             .spawn()
         {
             Ok(c) => c,
-            Err(_) => {
-                eprintln!("SKIP: z3 binary not found — engine assembly untested end-to-end");
-                return None;
-            }
+            Err(_) => { eprintln!("SKIP: no z3 binary"); return None; }
         };
-        child
-            .stdin
-            .as_mut()
-            .unwrap()
-            .write_all(script.as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        Some(String::from_utf8_lossy(&out.stdout).to_string())
+        ch.stdin.as_mut().unwrap().write_all(s.as_bytes()).unwrap();
+        Some(String::from_utf8_lossy(&ch.wait_with_output().unwrap().stdout).to_string())
+    }
+    fn head(o: &str) -> String { z3_head(o) }
+
+    /// Drive the analysis step-machine with the real z3 binary.
+    fn analyze(c: &Core) -> serde_json::Value {
+        let mut d = Driver::new(c);
+        let mut guard = 0;
+        while let Some(script) = d.next_script(c) {
+            let o = match z3(&script) { Some(o) => o, None => return serde_json::json!({"skip":true}) };
+            d.feed(c, &o);
+            guard += 1;
+            assert!(guard < 200, "driver did not terminate");
+        }
+        d.result()
     }
 
     #[test]
-    fn consistent_set_checks_sat() {
+    fn ir_compiles_and_renders() {
         let mut c = Core::default();
-        assert!(c.ingest(
-            r#"{"decls":[{"id":"P","smtlib":"(declare-const P Bool)","gloss":"p"}],
-                 "claims":[{"id":"c1","smt":"P"}]}"#
-        ).0);
-        if let Some(o) = z3(&c.smt_consistency()) {
-            assert!(o.starts_with("sat"), "z3 said: {o}");
-        }
+        assert!(c.ingest(r#"{"preds":[{"name":"P","args":[],"gloss":"p"}],
+            "claims":[{"id":"c1","formula":{"op":"pred","name":"P","args":[]}}]}"#).0);
+        assert_eq!(form_smt(&c.claims[0].formula), "P");
+        assert_eq!(form_en(&c.claims[0].formula), "P");
+        if let Some(o) = z3(&c.smt_check()) { assert_eq!(head(&o), "sat"); }
     }
 
     #[test]
-    fn penguin_contradiction_unsat_core_is_the_minimal_claims() {
-        let mut c = Core::default();
-        c.seed_demo();
-        if let Some(o) = z3(&c.smt_consistency()) {
-            assert!(o.starts_with("sat"), "pre-conflict should be sat: {o}");
-        }
-        assert!(c.ingest(
-            r#"{"claims":[{"id":"c_pen_nofly","source":"Penguins cannot fly.",
-                 "smt":"(=> Penguin (not Flies))"}]}"#
-        ).0);
-        if let Some(o) = z3(&c.smt_consistency()) {
-            assert!(o.starts_with("unsat"), "should be unsat: {o}");
-            for id in ["c_birds_fly", "c_penguin_bird", "c_is_penguin", "c_pen_nofly"] {
-                assert!(o.contains(id), "unsat core missing {id}: {o}");
-            }
-        }
-    }
-
-    #[test]
-    fn forced_consequence_via_entailment() {
-        // penguin ⇒ bird ⇒ flies, and it is a penguin: Flies is forced,
-        // though no claim asserts Flies on its own.
+    fn english_render_has_no_smt() {
         let mut c = Core::default();
         c.seed_demo();
-        assert_eq!(c.bool_atoms(), vec!["Bird", "Flies", "Penguin"]);
-        if let Some(o) = z3(&c.smt_entails("Flies")) {
-            assert!(o.starts_with("unsat"), "Flies should be entailed: {o}");
-        }
-        if let Some(o) = z3(&c.smt_entails("(not Flies)")) {
-            assert!(o.starts_with("sat"), "(not Flies) not entailed: {o}");
-        }
+        let r = form_en(&c.claims[0].formula);
+        assert!(r.contains("for every") && r.contains("if"), "{r}");
+        assert!(!r.contains("=>") && !r.contains("(op"), "leaked smt: {r}");
     }
 
     #[test]
-    fn agm_retract_restores_consistency() {
+    fn quantified_penguin_contradiction_and_core() {
         let mut c = Core::default();
         c.seed_demo();
-        c.ingest(r#"{"claims":[{"id":"c_pen_nofly","smt":"(=> Penguin (not Flies))"}]}"#);
-        c.set_active("c_birds_fly", false); // user's selection
-        if let Some(o) = z3(&c.smt_consistency()) {
-            assert!(o.starts_with("sat"), "retraction should restore sat: {o}");
-        }
+        if let Some(o) = z3(&c.smt_check()) { assert_eq!(head(&o), "sat", "{o}"); }
+        assert!(c.ingest(r#"{"claims":[{"id":"c_pen_nofly","source":"Penguins cannot fly.","weight":3,
+          "formula":{"op":"forall","vars":[{"name":"x","sort":"Thing"}],
+            "body":{"op":"imp",
+              "a":{"op":"pred","name":"Penguin","args":[{"t":"var","name":"x"}]},
+              "b":{"op":"not","x":{"op":"pred","name":"Flies","args":[{"t":"var","name":"x"}]}}}}}]}"#).0);
+        if let Some(o) = z3(&c.smt_check()) { assert_eq!(head(&o), "unsat", "{o}"); }
     }
 
     #[test]
-    fn beyond_propositional_arithmetic_conflict() {
-        // This is the point of using a real solver: x>5 ∧ x<3 is a
-        // contradiction no propositional engine could see.
+    fn analysis_minimal_conflict_and_optimal_repair() {
+        // weights: birds_fly 2, penguin_bird 5, tweety_penguin 4, pen_nofly 3
+        // single MUS = all four; min-weight repair drops birds_fly (2).
         let mut c = Core::default();
-        assert!(c.ingest(
-            r#"{"decls":[{"id":"x","smtlib":"(declare-const x Int)","gloss":"the number x"}],
-                 "claims":[
-                  {"id":"c_big","source":"x is more than five.","smt":"(> x 5)"},
-                  {"id":"c_small","source":"x is less than three.","smt":"(< x 3)"}]}"#
-        ).0);
-        if let Some(o) = z3(&c.smt_consistency()) {
-            assert!(o.starts_with("unsat"), "x>5 ∧ x<3 must be unsat: {o}");
-            assert!(o.contains("c_big") && o.contains("c_small"), "core: {o}");
+        c.seed_demo();
+        c.ingest(r#"{"claims":[{"id":"c_pen_nofly","weight":3,
+          "formula":{"op":"forall","vars":[{"name":"x","sort":"Thing"}],
+            "body":{"op":"imp",
+              "a":{"op":"pred","name":"Penguin","args":[{"t":"var","name":"x"}]},
+              "b":{"op":"not","x":{"op":"pred","name":"Flies","args":[{"t":"var","name":"x"}]}}}}}]}"#);
+        let r = analyze(&c);
+        if r.get("skip").is_some() { return; }
+        assert_eq!(r["status"], "inconsistent");
+        let mut mus: Vec<String> = r["mus"].as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        mus.sort();
+        assert_eq!(mus, vec!["c_birds_fly","c_pen_nofly","c_penguin_bird","c_tweety_penguin"]);
+        assert_eq!(r["repair"]["drop"], serde_json::json!(["c_birds_fly"]));
+        assert_eq!(r["repair"]["weight"], 2);
+    }
+
+    #[test]
+    fn analysis_consistent_set() {
+        let mut c = Core::default();
+        c.seed_demo();
+        let r = analyze(&c);
+        if r.get("skip").is_some() { return; }
+        assert_eq!(r["status"], "consistent");
+    }
+
+    #[test]
+    fn arithmetic_conflict_beyond_propositional() {
+        let mut c = Core::default();
+        c.ingest(r#"{"funcs":[{"name":"x","args":[],"ret":"Int","gloss":"the number x"}],
+          "claims":[
+           {"id":"c_big","formula":{"op":"cmp","rel":">","a":{"t":"app","name":"x","args":[]},"b":{"t":"int","v":5}}},
+           {"id":"c_small","formula":{"op":"cmp","rel":"<","a":{"t":"app","name":"x","args":[]},"b":{"t":"int","v":3}}}]}"#);
+        if let Some(o) = z3(&c.smt_check()) { assert_eq!(head(&o), "unsat", "{o}"); }
+        let r = analyze(&c);
+        if r.get("skip").is_some() { return; }
+        assert_eq!(r["status"], "inconsistent");
+        let mut mus: Vec<String> = r["mus"].as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        mus.sort();
+        assert_eq!(mus, vec!["c_big","c_small"]);
+    }
+
+    #[test]
+    fn entailment_forced_consequence() {
+        let mut c = Core::default();
+        c.seed_demo();
+        let probe: Formula = serde_json::from_str(
+            r#"{"op":"pred","name":"Flies","args":[{"t":"app","name":"tweety","args":[]}]}"#).unwrap();
+        if let Some(o) = z3(&c.smt_entails(&probe)) {
+            assert_eq!(head(&o), "unsat", "Flies(tweety) should be entailed: {o}");
         }
     }
 
     #[test]
     fn revision_replaces_same_id() {
         let mut c = Core::default();
-        c.ingest(
-            r#"{"decls":[{"id":"P","smtlib":"(declare-const P Bool)","gloss":"p"}],
-                 "claims":[{"id":"c1","smt":"P"}]}"#,
-        );
-        c.ingest(r#"{"claims":[{"id":"c1","smt":"(not P)"}]}"#);
+        c.ingest(r#"{"preds":[{"name":"P","args":[],"gloss":"p"}],
+          "claims":[{"id":"c1","formula":{"op":"pred","name":"P","args":[]}}]}"#);
+        c.ingest(r#"{"claims":[{"id":"c1","formula":{"op":"not","x":{"op":"pred","name":"P","args":[]}}}]}"#);
         assert_eq!(c.claims.len(), 1);
-        if let Some(o) = z3(&c.smt_consistency()) {
-            assert!(o.starts_with("sat"), "lone ¬P is sat: {o}");
-        }
-    }
-
-    #[test]
-    fn empty_smt_is_rejected_surfaced_not_guessed() {
-        let mut c = Core::default();
-        let (ok, e) = c.ingest(r#"{"claims":[{"id":"c1","smt":"  "}]}"#);
-        assert!(!ok);
-        assert!(e.iter().any(|m| m.contains("empty smt")), "{e:?}");
+        if let Some(o) = z3(&c.smt_check()) { assert_eq!(head(&o), "sat"); }
     }
 }

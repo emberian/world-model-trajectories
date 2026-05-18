@@ -11,8 +11,48 @@ export class WmtEngine {
         const ptr = this.__destroy_into_raw();
         wasm.__wbg_wmtengine_free(ptr, 0);
     }
+    analyze_begin() {
+        wasm.wmtengine_analyze_begin(this.__wbg_ptr);
+    }
     /**
-     * Ingest pasted JSON. `{ok, errors, meta}`.
+     * @param {string} z3_out
+     */
+    analyze_feed(z3_out) {
+        const ptr0 = passStringToWasm0(z3_out, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wmtengine_analyze_feed(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
+     * @returns {string}
+     */
+    analyze_next() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wmtengine_analyze_next(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    analyze_result() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wmtengine_analyze_result(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * @param {string} json
      * @returns {string}
      */
@@ -139,7 +179,25 @@ export class WmtEngine {
         }
     }
     /**
-     * Clean sat/unsat/unknown check (run first).
+     * @param {string} id
+     * @param {bigint} w
+     * @returns {string}
+     */
+    set_weight(id, w) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.wmtengine_set_weight(this.__wbg_ptr, ptr0, len0, w);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
      * @returns {string}
      */
     smt_check() {
@@ -155,14 +213,13 @@ export class WmtEngine {
         }
     }
     /**
-     * SMT-LIB2 with `get-unsat-core` (run only when smt_check is unsat).
      * @returns {string}
      */
-    smt_consistency() {
+    smt_core() {
         let deferred1_0;
         let deferred1_1;
         try {
-            const ret = wasm.wmtengine_smt_consistency(this.__wbg_ptr);
+            const ret = wasm.wmtengine_smt_core(this.__wbg_ptr);
             deferred1_0 = ret[0];
             deferred1_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);
@@ -171,17 +228,16 @@ export class WmtEngine {
         }
     }
     /**
-     * SMT-LIB2 to test whether the active set entails `term`.
-     * @param {string} term
+     * @param {string} formula_json
      * @returns {string}
      */
-    smt_entails(term) {
+    smt_entails_json(formula_json) {
         let deferred2_0;
         let deferred2_1;
         try {
-            const ptr0 = passStringToWasm0(term, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const ptr0 = passStringToWasm0(formula_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
             const len0 = WASM_VECTOR_LEN;
-            const ret = wasm.wmtengine_smt_entails(this.__wbg_ptr, ptr0, len0);
+            const ret = wasm.wmtengine_smt_entails_json(this.__wbg_ptr, ptr0, len0);
             deferred2_0 = ret[0];
             deferred2_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);

@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>world-model trajectories — a consistency loop</title>
-<meta name="description" content="Paste your claims to your own LLM, paste the SMT-LIB2 back, and watch the contradictions and forced consequences of your world-model arise. Real Z3 in the browser. The goal is consistency, not truth." />
+<meta name="description" content="Paste your claims to your own LLM, paste a typed logical IR back, and watch the contradictions, the least-entrenchment way out, and the forced consequences of your world-model arise. Real Z3 in the browser. You only ever read plain English. Consistency, not truth." />
 <meta property="og:title" content="world-model trajectories" />
 <meta property="og:description" content="A human + your-own-LLM loop for keeping a set of natural-language claims consistent. Real Z3 (wasm) finds the minimal conflicting claims and the things you never said but are committed to." />
 <link rel="stylesheet" href="style.css" />
@@ -24,13 +24,17 @@
     <h1>Keep your world-model<br><em>honest with itself</em>.</h1>
     <p class="lede">
       You hold a set of natural-language claims. This tool does <strong>not</strong>
-      parse them — <em>you</em> paste its prompt into whatever LLM you like, the LLM
-      returns a strict SMT-LIB2 formalization, you paste that back. Then a real
-      solver (Z3, compiled to wasm, running entirely in this tab) tells you the
-      <strong>smallest set of your claims that can't all be true</strong>, and the
-      things you <strong>never asserted but are now committed to</strong>. The
-      copy-paste round-trip <em>is</em> the seam where natural language meets logic —
-      surfaced on purpose, never hidden. Goal: consistency, not truth.
+      parse them — <em>you</em> paste its prompt into whatever LLM you like; the LLM
+      returns a <strong>typed logical IR as JSON</strong> (models are reliable at
+      structured JSON, unreliable at solver syntax); you paste that back. You never
+      read logic syntax — only your sentence and our plain-English rendering of what
+      it became. A trusted, test-pinned compiler turns the IR into SMT for
+      <strong>Z3</strong> (wasm, entirely in this tab), which returns the
+      <strong>smallest set of your claims that can't all be true</strong>, the
+      <strong>least-entrenchment way out</strong>, and what you
+      <strong>never asserted but are now committed to</strong>. The round-trip
+      <em>is</em> the seam where language meets logic — surfaced on purpose,
+      legible, never hidden. Goal: consistency, not truth.
     </p>
     <div class="row">
       <button class="btn warm" id="seedBtn">Load the penguin demo</button>
@@ -66,36 +70,31 @@
       <textarea id="prompt" readonly placeholder="the prompt to paste into your LLM appears here"></textarea>
     </div>
     <div class="card">
-      <div class="step">Step 2 — paste the formalization back</div>
-      <h3>JSON → trajectory</h3>
-      <p class="small muted">Paste exactly the JSON your LLM returned. Bad symbols / malformed SMT are surfaced verbatim from Z3 — never silently guessed.</p>
-      <textarea id="json" placeholder='{"decls":[…],"claims":[…]}'></textarea>
-      <div class="row"><button class="btn" id="ingestBtn">Ingest &amp; check</button></div>
+      <div class="step">Step 2 — paste the IR back</div>
+      <h3>IR JSON → trajectory</h3>
+      <p class="small muted">Paste exactly the JSON your LLM returned. It is the typed IR, not solver syntax. Malformed IR or type errors are surfaced — never silently guessed. Each claim then shows as plain English you confirm.</p>
+      <textarea id="json" placeholder='{"sorts":[…],"preds":[…],"funcs":[…],"claims":[{"id":…,"formula":{…}}]}'></textarea>
+      <div class="row"><button class="btn" id="ingestBtn">Ingest &amp; analyze</button></div>
       <div id="errs"></div>
     </div>
   </div>
 </section>
 
-<section id="ask">
-  <h2>Ask your world a question</h2>
-  <p class="subhead">An SMT-LIB2 term. "Does everything I've said force this?" — entailment, by Z3.</p>
-  <div class="row" style="flex-wrap:nowrap">
-    <input type="text" id="query" placeholder="(=> Penguin (not Flies))" />
-    <button class="btn" id="askBtn">Ask</button>
-  </div>
-  <div id="askOut" class="small"></div>
+<section id="forcedsec">
+  <h2>What you're committed to</h2>
+  <p class="subhead">When the set is consistent, Z3 is asked, for every boolean atom, whether the whole set <em>entails</em> it — the things you never asserted but cannot now deny. Shown automatically below the trajectory. (Free-form entailment queries over the full IR are on the roadmap.)</p>
 </section>
 
 <section id="how">
   <h2>What this is — and what it is not</h2>
   <div class="seam"><strong>The seam is the point.</strong> Three places this is honest about, none hidden:
     <ol class="small">
-      <li><b>NL → SMT-LIB2 faithfulness</b> is done by you + your LLM, in the open, by copy-paste. The tool guarantees consistency <em>of the formalization</em>, never that the formalization faithfully captures your sentence. That is yours to confirm — cheaply, in the loop.</li>
-      <li><b>Z3 can answer <span class="kbd">unknown</span></b> on hard quantified fragments. When it does, it says so. It is not silently treated as "consistent".</li>
-      <li><b>Registry discipline</b> (reuse a symbol, don't mint a synonym) is enforced by Z3's own type-checker: a bad symbol surfaces as Z3's verbatim error, not a guess.</li>
+      <li><b>NL → IR faithfulness</b> is done by you + your LLM, in the open. You confirm the plain-English render of what each sentence became — never logic syntax. The tool guarantees consistency <em>of the formalization</em>, never that it faithfully captures your sentence. That stays yours.</li>
+      <li><b>Z3 can answer <span class="kbd">unknown</span></b> on hard quantified fragments. When it does, it says so. It is never silently treated as "consistent".</li>
+      <li><b>Vocabulary discipline</b> (reuse a symbol, don't mint a synonym) — the prompt carries your current vocabulary so the LLM reuses it; mismatches surface as a type error from Z3, not a silent guess.</li>
     </ol>
-    The goal is <em>consistency, not truth</em>: the tool never claims your claims are right — only whether they can all hold at once, which is the smallest, and the only fully-mechanizable, part of the problem.</div>
-  <p class="small muted">Engine: a Rust core (<code>wmt-core</code>, wasm) owns the registry, the trajectory, AGM selection, and SMT assembly — it does not solve. The solver is Z3 4.16 (wasm), running in this tab; the same SMT-LIB2 is verified end-to-end against the native Z3 binary in the crate's test suite. First load fetches ~34&nbsp;MB of Z3 wasm (then cached).</p>
+    The goal is <em>consistency, not truth</em>: the tool never claims your claims are right — only whether they can all hold at once (the smallest, and only fully-mechanizable, part), the least-entrenchment way out, and what they jointly force.</div>
+  <p class="small muted">Engine: a Rust core (<code>wmt-core</code>, wasm) owns the typed IR, the IR↔SMT compiler, the English renderer, the trajectory, and the analysis driver — it does <em>not</em> solve. The solver is Z3 4.16 (wasm), in this tab. The IR→SMT compiler, the minimal-conflict shrink, and the min-entrenchment optimal repair are verified end-to-end against the native Z3 binary (8 tests, incl. a quantified contradiction and an arithmetic one — not toy propositional). First load fetches ~34&nbsp;MB of Z3 wasm (then cached).</p>
 </section>
 
 </main>
