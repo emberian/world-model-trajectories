@@ -3,42 +3,37 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>world-model trajectories — a consistency loop</title>
-<meta name="description" content="Paste your claims to your own LLM, paste a typed logical IR back, and watch the contradictions, the least-entrenchment way out, and the forced consequences of your world-model arise. Real Z3 in the browser. You only ever read plain English. Consistency, not truth." />
+<title>world-model trajectories — a dialectic instrument</title>
+<meta name="description" content="Hold a set of claims. Your own LLM turns them into a typed logical IR; real Z3 (wasm, in-tab) shows every coherent position they admit, every irreducible disagreement, and the least-entrenchment way out. You only read plain English. Consistency, not truth." />
 <meta property="og:title" content="world-model trajectories" />
-<meta property="og:description" content="A human + your-own-LLM loop for keeping a set of natural-language claims consistent. Real Z3 (wasm) finds the minimal conflicting claims and the things you never said but are committed to." />
+<meta property="og:description" content="Not a contradiction-checker — a dialectic instrument. The full space of coherent positions your claims admit, the irreducible conflicts, and the way out, computed by real Z3 in the browser." />
 <link rel="stylesheet" href="style.css?v=__WMTVER__" />
 </head>
 <body>
 
 <nav class="nav">
-  <span class="mark">⊢</span>
-  <b>world-model trajectories</b>
-  <span class="sub">a consistency loop · after stella</span>
-  <span class="right" id="z3status">booting Z3…</span>
+  <span class="glyph">⊢</span>
+  <b>world-model&nbsp;trajectories</b>
+  <span class="tag">a dialectic instrument · after stella</span>
+  <span class="z3" id="z3">booting Z3<span class="spin"></span></span>
 </nav>
 
 <header class="hero">
   <div class="wrap">
-    <p class="eyebrow">human + your own LLM · real Z3 in the browser · consistency, not truth</p>
-    <h1>Keep your world-model<br><em>honest with itself</em>.</h1>
+    <p class="kick">human + your own LLM · real Z3, in this tab · consistency, not truth</p>
+    <h1>The shape of a<br>world-model&rsquo;s <em>disagreement</em>.</h1>
     <p class="lede">
-      You hold a set of natural-language claims. This tool does <strong>not</strong>
-      parse them — <em>you</em> paste its prompt into whatever LLM you like; the LLM
-      returns a <strong>typed logical IR as JSON</strong> (models are reliable at
-      structured JSON, unreliable at solver syntax); you paste that back. You never
-      read logic syntax — only your sentence and our plain-English rendering of what
-      it became. A trusted, test-pinned compiler turns the IR into SMT for
-      <strong>Z3</strong> (wasm, entirely in this tab), which returns the
-      <strong>smallest set of your claims that can't all be true</strong>, the
-      <strong>least-entrenchment way out</strong>, and what you
-      <strong>never asserted but are now committed to</strong>. The round-trip
-      <em>is</em> the seam where language meets logic — surfaced on purpose,
-      legible, never hidden. Goal: consistency, not truth.
+      Hold a set of claims. This tool never parses them — <b>your</b> LLM turns
+      each into a typed logical IR (you confirm the plain-English render, never
+      syntax). Then a real solver computes not a yes/no but the whole dialectic:
+      <b>every coherent position</b> the claims admit, <b>every irreducible
+      disagreement</b> between them, and the <b>least-entrenchment way out</b>.
+      The trajectory is the object; the conflict is its structure.
     </p>
-    <div class="row">
-      <button class="btn warm" id="seedBtn">Load the penguin demo</button>
-      <a class="btn ghost" href="#how">How it works</a>
+    <div class="cta">
+      <button class="btn warm" id="seed">Load the penguin trajectory</button>
+      <a class="btn ghost" href="#loop">Add a claim</a>
+      <a class="btn ghost" href="#how">What this is &amp; isn&rsquo;t</a>
       <a class="btn ghost" href="https://github.com/emberian/world-model-trajectories">Source</a>
     </div>
   </div>
@@ -46,63 +41,81 @@
 
 <main class="wrap">
 
-<section id="trajectory">
-  <h2>The trajectory</h2>
-  <p class="subhead">Every claim you've formalized. Retract one to resolve a conflict — the selection is yours (AGM-style); consistency is recomputed by Z3, not asserted.</p>
-  <div id="statusLine"><span class="status muted">no claims yet</span></div>
-  <div id="claims"></div>
-  <div id="forced"></div>
-  <details style="margin-top:14px"><summary class="muted small">atom / declaration registry</summary>
-    <div id="registry" class="small"></div></details>
-</section>
+  <div class="instrument">
+    <section class="panel" id="trajpanel">
+      <h2>Trajectory</h2>
+      <p class="sub">Each claim, as your sentence and its rendered logic. The colour is its dialectical standing across <em>all</em> coherent positions — necessary, contested, or defeated. Entrenchment is how hard it is to give up; it is yours to set.</p>
+      <div id="claims"></div>
+    </section>
 
-<section id="loop">
-  <div class="grid">
-    <div class="card">
-      <div class="step">Step 1 — formalize with your LLM</div>
-      <h3>Claim → prompt</h3>
-      <p class="small muted">Type one or more natural-language claims. Build the prompt, copy it, paste it into your LLM (it already contains your current registry so the LLM reuses your symbols).</p>
-      <textarea id="nl" placeholder="e.g.  A penguin cannot fly.&#10;Every penguin is a bird."></textarea>
-      <div class="row">
-        <button class="btn" id="promptBtn">Build prompt</button>
-        <button class="btn ghost sm" id="copyBtn">Copy</button>
-      </div>
-      <textarea id="prompt" readonly placeholder="the prompt to paste into your LLM appears here"></textarea>
-    </div>
-    <div class="card">
-      <div class="step">Step 2 — paste the IR back</div>
-      <h3>IR JSON → trajectory</h3>
-      <p class="small muted">Paste exactly the JSON your LLM returned. It is the typed IR, not solver syntax. Malformed IR or type errors are surfaced — never silently guessed. Each claim then shows as plain English you confirm.</p>
-      <textarea id="json" placeholder='{"sorts":[…],"preds":[…],"funcs":[…],"claims":[{"id":…,"formula":{…}}]}'></textarea>
-      <div class="row"><button class="btn" id="ingestBtn">Ingest &amp; analyze</button></div>
-      <div id="errs"></div>
-    </div>
+    <section class="panel" id="fieldpanel">
+      <h2>Coherence field</h2>
+      <p class="sub">Computed by Z3 in this tab — not asserted. The diagram is the conflict structure; the cards are the positions you could actually hold.</p>
+      <div id="status" class="statusbar muted"><span>no claims yet — load the trajectory, or add one below</span></div>
+      <div id="field"></div>
+    </section>
   </div>
-</section>
 
-<section id="forcedsec">
-  <h2>What you're committed to</h2>
-  <p class="subhead">When the set is consistent, Z3 is asked, for every boolean atom, whether the whole set <em>entails</em> it — the things you never asserted but cannot now deny. Shown automatically below the trajectory. (Free-form entailment queries over the full IR are on the roadmap.)</p>
-</section>
+  <details class="loop" id="loop">
+    <summary>Add a claim — the formalization loop</summary>
+    <div class="body">
+      <div>
+        <div class="step">Step 1 · formalize with your LLM</div>
+        <textarea id="nl" placeholder="A penguin cannot fly.&#10;Every penguin is a bird."></textarea>
+        <div class="cta" style="margin-top:var(--s3)">
+          <button class="btn sm" id="mkprompt">Build prompt</button>
+          <button class="btn ghost sm" id="copy">Copy</button>
+        </div>
+        <textarea id="prompt" readonly placeholder="the prompt (carrying your current vocabulary so the LLM reuses it) appears here — paste it into any LLM"></textarea>
+      </div>
+      <div>
+        <div class="step">Step 2 · paste the IR back</div>
+        <textarea id="json" placeholder='{"sorts":[…],"preds":[…],"funcs":[…],"claims":[{"id":…,"source":…,"weight":1,"formula":{…}}]}'></textarea>
+        <div class="cta" style="margin-top:var(--s3)">
+          <button class="btn sm" id="ingest">Ingest &amp; analyze</button>
+        </div>
+        <p class="muted small" style="margin-top:var(--s2)">Typed IR, not solver syntax. Malformed IR or type errors are surfaced verbatim — never silently guessed. Each claim then appears as plain English you confirm.</p>
+        <div id="errs"></div>
+      </div>
+    </div>
+  </details>
 
-<section id="how">
-  <h2>What this is — and what it is not</h2>
-  <div class="seam"><strong>The seam is the point.</strong> Three places this is honest about, none hidden:
-    <ol class="small">
-      <li><b>NL → IR faithfulness</b> is done by you + your LLM, in the open. You confirm the plain-English render of what each sentence became — never logic syntax. The tool guarantees consistency <em>of the formalization</em>, never that it faithfully captures your sentence. That stays yours.</li>
-      <li><b>Z3 can answer <span class="kbd">unknown</span></b> on hard quantified fragments. When it does, it says so. It is never silently treated as "consistent".</li>
-      <li><b>Vocabulary discipline</b> (reuse a symbol, don't mint a synonym) — the prompt carries your current vocabulary so the LLM reuses it; mismatches surface as a type error from Z3, not a silent guess.</li>
-    </ol>
-    The goal is <em>consistency, not truth</em>: the tool never claims your claims are right — only whether they can all hold at once (the smallest, and only fully-mechanizable, part), the least-entrenchment way out, and what they jointly force.</div>
-  <p class="small muted">Engine: a Rust core (<code>wmt-core</code>, wasm) owns the typed IR, the IR↔SMT compiler, the English renderer, the trajectory, and the analysis driver — it does <em>not</em> solve. The solver is Z3 4.16 (wasm), in this tab. The IR→SMT compiler, the minimal-conflict shrink, and the min-entrenchment optimal repair are verified end-to-end against the native Z3 binary (8 tests, incl. a quantified contradiction and an arithmetic one — not toy propositional). First load fetches ~34&nbsp;MB of Z3 wasm (then cached).</p>
-</section>
+  <section class="prose" id="how">
+    <h2>What this is &mdash; and what it is not</h2>
+    <div class="seam">
+      <strong>The seam is the point — three places this is honest about, none hidden:</strong>
+      <ol>
+        <li><b>NL&nbsp;→&nbsp;IR faithfulness</b> is you + your LLM, in the open. You confirm the rendered English, never logic. The tool guarantees consistency <em>of the formalization</em>, never that it captures your sentence. That stays yours.</li>
+        <li><b>Z3 can answer <code>unknown</code></b> on hard quantified fragments. It says so — never silently &ldquo;consistent&rdquo;.</li>
+        <li><b>Full enumeration is capped</b> at 10 active claims. Above it the instrument honestly falls back to the single minimal conflict + the optimal repair — it never silently truncates the lattice.</li>
+      </ol>
+      Goal: <em>consistency, not truth.</em> It never claims your claims are right — only which subsets can hold together (the dialectic), which can&rsquo;t (the irreducible disagreements), the least-entrenchment way out, and what you&rsquo;re jointly committed to.
+    </div>
+    <p class="small muted">
+      A truth-maintenance system + AGM belief revision, made legible
+      (Doyle / de&nbsp;Kleer / Alchourrón–Gärdenfors–Makinson; minimal
+      conflicts &amp; their hitting-set–dual correction sets, Reiter /
+      Liffiton–Sakallah). A Rust core (<code>wmt-core</code>, wasm) owns the
+      typed IR, the IR↔SMT compiler, the English renderer, the trajectory,
+      and the lattice/repair drivers — it does <em>not</em> solve. The solver
+      is Z3&nbsp;4.16 (wasm), here in your tab. Compiler, minimal-conflict
+      enumeration, Reiter duality and the min-entrenchment repair are
+      verified end-to-end against the native Z3 binary — 11 tests,
+      incl. a quantified contradiction, an arithmetic one, and the
+      two-independent-conflicts duality. First load fetches ~34&nbsp;MB of
+      Z3 wasm, then it is cached.
+    </p>
+  </section>
 
 </main>
 
-<footer class="wrap">
-  world-model-trajectories · built for a question from <a href="https://twitter.com/bananawalnutz">@bananawalnutz</a> ·
-  a sibling of <a href="https://github.com/emberian">stella / svenvs</a> · MIT/Apache-2.0 ·
-  Z3 © Microsoft (MIT).
+<footer>
+  <div class="wrap">
+    world-model-trajectories · built for a question from
+    <a href="https://twitter.com/bananawalnutz">@bananawalnutz</a> ·
+    a sibling of <a href="https://github.com/emberian">stella / svenvs</a> ·
+    MIT/Apache-2.0 · Z3 © Microsoft (MIT). Everything runs locally; nothing leaves the tab.
+  </div>
 </footer>
 
 <script src="vendor/z3/z3-built.js"></script>
