@@ -55,6 +55,15 @@ async function driveLattice() {
   }
   return JSON.parse(engine.lattice_result());
 }
+async function driveWitness(formulaObj) {
+  engine.witness_begin(JSON.stringify(formulaObj));
+  let g = 0;
+  for (let s = engine.witness_next(); s; s = engine.witness_next()) {
+    engine.witness_feed(await run(s));
+    if (++g > 200) break;
+  }
+  return JSON.parse(engine.witness_result());
+}
 
 let META = { claims: [] };
 
@@ -67,8 +76,10 @@ function renderClaims(statusOf) {
     const d = document.createElement('div');
     d.className = `claim ${c.active ? st : 'inactive'}`;
     d.id = 'cl-' + c.id;
+    const back = c.back
+      ? `<div class="back">your LLM read it back as: <i>${esc(c.back)}</i></div>` : '';
     d.innerHTML =
-      `<div class="src">${esc(c.source || c.gloss || c.id)}</div>` +
+      `<div class="src">${esc(c.source || c.gloss || c.id)}</div>` + back +
       `<div class="ren">${esc(c.render)}</div>` +
       `<div class="foot">` +
       `<span class="cid">${esc(c.id)}</span>` +
@@ -134,16 +145,27 @@ async function forced() {
   ];
   const out = [];
   for (const p of probes) {
+    let val = null, formula = null;
     if (z3head(await run(engine.smt_entails_json(JSON.stringify(p.formula)))) === 'unsat') {
-      out.push([p.label, true]); continue;
+      val = true; formula = p.formula;
+    } else if (z3head(await run(engine.smt_entails_json(JSON.stringify({ op: 'not', x: p.formula })))) === 'unsat') {
+      val = false; formula = { op: 'not', x: p.formula };
     }
-    if (z3head(await run(engine.smt_entails_json(JSON.stringify({ op: 'not', x: p.formula })))) === 'unsat') {
-      out.push([p.label, false]);
+    if (val === null) continue;
+    // explanation witness: the minimal set of claims that forces it.
+    let because = [];
+    if (out.length < 8) { // bound the extra solver work, honestly
+      const w = await driveWitness(formula);
+      if (w.entailed) because = w.witness || [];
     }
+    out.push([p.label, val, because]);
   }
   return out.length
     ? `<div class="fieldlabel">What you're committed to</div><div class="forced">` +
-      out.map(([a, v]) => `<code class="tok">${esc(a)}</code> = ${v ? 'true' : 'false'}`).join(' &nbsp;·&nbsp; ') +
+      out.map(([a, v, b]) =>
+        `<div><code class="tok">${esc(a)}</code> = ${v ? 'true' : 'false'}` +
+        (b && b.length ? ` <span class="muted">— because ${b.map((x) => `<code class="tok">${esc(short(x))}</code>`).join(' · ')}</span>` : '') +
+        `</div>`).join('') +
       `</div>` : '';
 }
 

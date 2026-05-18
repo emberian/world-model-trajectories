@@ -29,7 +29,11 @@ await page.waitForFunction(() => /coherent/i.test(document.querySelector('#statu
 const claimN = await page.$$eval('#claims .claim', (e) => e.length);
 if (claimN !== 3) fail('expected 3 seeded claims, got ' + claimN);
 // forced consequences fill #field asynchronously after "coherent" shows
-await page.waitForFunction(() => /Flies/.test(document.querySelector('#field')?.textContent || ''), null, { timeout: 90000 }).catch(() => fail('forced consequence Flies(tweety) never rendered'));
+await page.waitForFunction(() => /because/.test(document.querySelector('#field')?.textContent || ''), null, { timeout: 90000 }).catch(() => fail('forced consequence + "because" witness never rendered'));
+{
+  const fld = await page.$eval('#field', (e) => e.textContent);
+  if (!/Flies/.test(fld)) fail('expected Flies(tweety) forced, got ' + fld.slice(0, 140));
+}
 console.log('· consistent: 3 claims, forced consequence shown');
 
 // 2. introduce the contradiction via the IR loop

@@ -98,6 +98,9 @@ h1 em{font-style:italic;color:var(--moss)}
 .claim .ren{font-family:var(--mono);font-size:.76rem;color:var(--fg2);margin-top:5px;
   word-break:break-word;line-height:1.45}
 .claim .ren::before{content:'⊢ ';color:var(--bark)}
+.claim .back{font-size:.8rem;color:var(--fg3);margin-top:4px;font-style:italic}
+.claim .back i{color:var(--fg2)}
+.forced>div{margin:3px 0}
 .claim .foot{display:flex;align-items:center;gap:var(--s2);margin-top:var(--s3);flex-wrap:wrap}
 .claim .cid{font-family:var(--mono);font-size:.68rem;color:var(--bark);margin-right:auto}
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block}

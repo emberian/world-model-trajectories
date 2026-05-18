@@ -93,6 +93,11 @@ pub struct Claim {
     #[serde(default)]
     pub gloss: String,
     pub formula: Formula,
+    /// The LLM's own plain-English paraphrase of what it formalized — the
+    /// back-translation. Shown beside `source` so the human can confirm
+    /// the seam cheaply (NL → IR faithfulness, surfaced not hidden).
+    #[serde(default)]
+    pub back: String,
     #[serde(default = "w1")]
     pub weight: i64, // epistemic entrenchment (higher = harder to give up)
     #[serde(default = "dtrue")]
@@ -469,6 +474,8 @@ a typed many-sorted first-order IR and return ONLY this JSON object:\n\
   \"funcs\":[{{\"name\":\"age\",\"args\":[\"Thing\"],\"ret\":\"Int\",\"gloss\":\"age of x\"}}],\n\
   \"claims\":[{{\"id\":\"c_slug\",\"source\":\"<the sentence verbatim>\",\n\
     \"gloss\":\"<=6 words\",\"weight\":1,\n\
+    \"back\":\"<one plain-English sentence that says EXACTLY what your\n\
+            formula means — your own back-translation>\",\n\
     \"formula\":{{...}}}}]}}\n\
 \n\
 FORMULA grammar (JSON, field \"op\"): pred{{name,args}} eq{{a,b}}\n\
@@ -485,7 +492,10 @@ Rules, most important first:\n\
    hard the claim is to give up (epistemic entrenchment, default 1).\n\
 3. Prefer typed quantified formulas: \"penguins don't fly\" =>\n\
    forall x:Thing. (=> (Penguin x) (not (Flies x))).\n\
-4. No SMT-LIB, no prose, no code fences. JSON only.\n\
+4. \"back\" must paraphrase the FORMULA, not echo \"source\". If they\n\
+   would differ, trust the formula and let the human see the gap — that\n\
+   is the point of the field.\n\
+5. No SMT-LIB, no prose, no code fences. JSON only.\n\
 \n\
 VOCABULARY:\n\
 {}\n\
@@ -572,7 +582,8 @@ CLAIM(S) TO FORMALIZE:\n\
         serde_json::json!({
             "claims": self.claims.iter().map(|c| serde_json::json!({
                 "id": c.id, "source": c.source, "gloss": c.gloss,
-                "render": form_en(&c.formula), "weight": c.weight, "active": c.active,
+                "render": form_en(&c.formula), "back": c.back,
+                "weight": c.weight, "active": c.active,
             })).collect::<Vec<_>>(),
             "vocab": self.registry_view(),
             "bool_atoms": self.preds.values()
@@ -622,6 +633,31 @@ impl Core {
                 form_smt(&self.claims[i].formula)
             ));
         }
+        let lits = assume_ids
+            .iter()
+            .map(|id| format!("a_{id}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        s.push_str(&format!("(check-sat-assuming ({lits}))\n(get-unsat-core)\n"));
+        s
+    }
+
+    /// Like `smt_assume`, but also asserts the NEGATION of `probe`. Then
+    /// `assume_ids` ∧ ¬probe being **unsat** means those claims entail
+    /// `probe`; the unsat core (over the a_ids) is the witness — the
+    /// minimal set of claims responsible. ("Flies(tweety) BECAUSE …")
+    pub fn smt_entail_assume(&self, probe: &Formula, assume_ids: &[String]) -> String {
+        let mut s = String::from("(set-option :produce-unsat-cores true)\n(set-logic ALL)\n");
+        s.push_str(&self.decls_smt());
+        for &i in &self.active() {
+            let id = &self.claims[i].id;
+            s.push_str(&format!("(declare-const a_{id} Bool)\n"));
+            s.push_str(&format!(
+                "(assert (=> a_{id} {}))\n",
+                form_smt(&self.claims[i].formula)
+            ));
+        }
+        s.push_str(&format!("(assert (not {}))\n", form_smt(probe)));
         let lits = assume_ids
             .iter()
             .map(|id| format!("a_{id}"))
@@ -813,13 +849,14 @@ pub struct WmtEngine {
     core: Core,
     drv: Option<Driver>,
     lat: Option<Lattice>,
+    wit: Option<WitnessDriver>,
 }
 
 #[wasm_bindgen]
 impl WmtEngine {
     #[wasm_bindgen(constructor)]
     pub fn new() -> WmtEngine {
-        WmtEngine { core: Core::default(), drv: None, lat: None }
+        WmtEngine { core: Core::default(), drv: None, lat: None, wit: None }
     }
     pub fn ingest(&mut self, json: &str) -> String {
         let (ok, errors) = self.core.ingest(json);
@@ -898,6 +935,34 @@ impl WmtEngine {
         self.lat
             .as_ref()
             .map(|l| l.result().to_string())
+            .unwrap_or_else(|| "{}".into())
+    }
+
+    // ---- explanation witnesses -------------------------------------------
+    // Why is a consequence forced? The minimal set of active claims that
+    // entails `formula_json`. Same step-machine contract.
+    pub fn witness_begin(&mut self, formula_json: &str) {
+        self.wit = match serde_json::from_str::<Formula>(formula_json) {
+            Ok(f) => Some(WitnessDriver::new(&self.core, f)),
+            Err(_) => None,
+        };
+    }
+    pub fn witness_next(&self) -> String {
+        self.wit
+            .as_ref()
+            .and_then(|w| w.next_script(&self.core))
+            .unwrap_or_default()
+    }
+    pub fn witness_feed(&mut self, z3_out: &str) {
+        if let Some(w) = self.wit.as_mut() {
+            let core = &self.core;
+            w.feed(core, z3_out);
+        }
+    }
+    pub fn witness_result(&self) -> String {
+        self.wit
+            .as_ref()
+            .map(|w| w.result().to_string())
             .unwrap_or_else(|| "{}".into())
     }
 }
@@ -1074,6 +1139,103 @@ impl Lattice {
     }
 }
 
+// ---- explanation-witness step machine ------------------------------------
+// `probe` is forced iff (active claims) ∧ ¬probe is unsat. The unsat core
+// over the assumption literals is the responsible set; deletion-shrink
+// makes it minimal. "Flies(tweety) BECAUSE {birds_fly, penguin_bird,
+// tweety_penguin}." Mirrors Driver's verified CheckAll/Shrink contract.
+
+enum WPhase {
+    CheckAll,
+    Shrink { cand: Vec<String>, i: usize },
+    Done,
+}
+
+struct WitnessDriver {
+    probe: Formula,
+    active: Vec<String>,
+    phase: WPhase,
+    status: String, // entailed | not_entailed | unknown
+    witness: Vec<String>,
+}
+
+impl WitnessDriver {
+    fn new(core: &Core, probe: Formula) -> WitnessDriver {
+        WitnessDriver {
+            probe,
+            active: core.active_ids(),
+            phase: WPhase::CheckAll,
+            status: String::new(),
+            witness: vec![],
+        }
+    }
+    fn next_script(&self, core: &Core) -> Option<String> {
+        match &self.phase {
+            WPhase::CheckAll => Some(core.smt_entail_assume(&self.probe, &self.active)),
+            WPhase::Shrink { cand, i } => {
+                let mut c = cand.clone();
+                c.remove(*i);
+                Some(core.smt_entail_assume(&self.probe, &c))
+            }
+            WPhase::Done => None,
+        }
+    }
+    fn feed(&mut self, _core: &Core, out: &str) {
+        let h = z3_head(out);
+        match std::mem::replace(&mut self.phase, WPhase::Done) {
+            WPhase::CheckAll => {
+                if h.starts_with("unsat") {
+                    self.status = "entailed".into();
+                    let mut cand = z3_core_ids(out);
+                    if cand.is_empty() {
+                        cand = self.active.clone();
+                    }
+                    if cand.len() <= 1 {
+                        self.witness = cand;
+                        self.phase = WPhase::Done;
+                    } else {
+                        self.phase = WPhase::Shrink { cand, i: 0 };
+                    }
+                } else if h.starts_with("sat") {
+                    self.status = "not_entailed".into();
+                    self.phase = WPhase::Done;
+                } else {
+                    self.status = "unknown".into();
+                    self.phase = WPhase::Done;
+                }
+            }
+            WPhase::Shrink { mut cand, i } => {
+                if h.starts_with("unsat") {
+                    cand.remove(i); // still entails without it
+                } else {
+                    let ni = i + 1;
+                    if ni >= cand.len() {
+                        self.witness = cand;
+                        self.phase = WPhase::Done;
+                    } else {
+                        self.phase = WPhase::Shrink { cand, i: ni };
+                    }
+                    return;
+                }
+                if i >= cand.len() {
+                    self.witness = cand;
+                    self.phase = WPhase::Done;
+                } else {
+                    self.phase = WPhase::Shrink { cand, i };
+                }
+            }
+            WPhase::Done => {}
+        }
+    }
+    fn result(&self) -> serde_json::Value {
+        serde_json::json!({
+            "status": self.status,
+            "entailed": self.status == "entailed",
+            "witness": self.witness,
+        })
+    }
+}
+
 impl Default for WmtEngine {
     fn default() -> Self { Self::new() }
 }
@@ -1126,6 +1288,86 @@ mod tests {
             assert!(guard < 4096, "lattice did not terminate");
         }
         l.result()
+    }
+
+    fn witness(c: &Core, probe: Formula) -> serde_json::Value {
+        let mut w = WitnessDriver::new(c, probe);
+        let mut g = 0;
+        while let Some(s) = w.next_script(c) {
+            let o = match z3(&s) {
+                Some(o) => o,
+                None => return serde_json::json!({ "skip": true }),
+            };
+            w.feed(c, &o);
+            g += 1;
+            assert!(g < 200, "witness did not terminate");
+        }
+        w.result()
+    }
+
+    #[test]
+    fn explanation_witness_is_minimal() {
+        // Flies(tweety) is forced; the witness is exactly the 3-claim
+        // chain that forces it — minimal, not the whole knowledge base.
+        let mut c = Core::default();
+        c.seed_demo();
+        let probe: Formula = serde_json::from_str(
+            r#"{"op":"pred","name":"Flies","args":[{"t":"app","name":"tweety","args":[]}]}"#,
+        )
+        .unwrap();
+        let r = witness(&c, probe);
+        if r.get("skip").is_some() {
+            return;
+        }
+        assert_eq!(r["status"], "entailed");
+        let mut w: Vec<String> = r["witness"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        w.sort();
+        assert_eq!(
+            w,
+            vec!["c_birds_fly", "c_penguin_bird", "c_tweety_penguin"],
+            "witness must be the minimal forcing chain"
+        );
+    }
+
+    #[test]
+    fn explanation_witness_not_entailed() {
+        // Only "birds fly" — Flies(tweety) is NOT forced (nothing says
+        // tweety is a bird).
+        let mut c = Core::default();
+        c.ingest(
+            r#"{"sorts":["Thing"],
+              "preds":[{"name":"Bird","args":["Thing"]},{"name":"Flies","args":["Thing"]}],
+              "funcs":[{"name":"tweety","args":[],"ret":"Thing"}],
+              "claims":[{"id":"c_bf","formula":{"op":"forall","vars":[{"name":"x","sort":"Thing"}],
+                "body":{"op":"imp","a":{"op":"pred","name":"Bird","args":[{"t":"var","name":"x"}]},
+                                    "b":{"op":"pred","name":"Flies","args":[{"t":"var","name":"x"}]}}}}]}"#,
+        );
+        let probe: Formula = serde_json::from_str(
+            r#"{"op":"pred","name":"Flies","args":[{"t":"app","name":"tweety","args":[]}]}"#,
+        )
+        .unwrap();
+        let r = witness(&c, probe);
+        if r.get("skip").is_some() {
+            return;
+        }
+        assert_eq!(r["status"], "not_entailed");
+        assert_eq!(r["entailed"], false);
+    }
+
+    #[test]
+    fn back_translation_field_round_trips() {
+        let mut c = Core::default();
+        assert!(c.ingest(
+            r#"{"preds":[{"name":"P","args":[],"gloss":"p"}],
+              "claims":[{"id":"c1","source":"It is P.","back":"P holds.",
+                "formula":{"op":"pred","name":"P","args":[]}}]}"#
+        ).0);
+        assert_eq!(c.meta()["claims"][0]["back"], "P holds.");
     }
 
     fn as_sets(v: &serde_json::Value) -> Vec<Vec<String>> {
