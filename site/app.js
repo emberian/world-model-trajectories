@@ -455,6 +455,13 @@ async function doRefresh() {
       `<div class="keeps small">If some of these are <em>defaults</em> (“birds fly”) with a more-specific exception (“penguins don’t”), this isn’t inconsistent — the specific overrides the general. Specificity is derived from your own strict claims, not hand-ranked.</div>` +
       `<div class="row"><button class="btn warm sm" id="asdefaults">Treat the universal rules as defaults</button></div></div>`;
   }
+  const triMus = (muses[0] && muses[0].length) ? muses[0] : (drv.mus || []);
+  if (orKey() && triMus.length) {
+    html += `<div class="pos"><h4>Real disagreement, or mis-formalization?</h4>` +
+      `<div class="keeps small">Ask your model whether this minimal conflict is a genuine belief clash or a translation artifact. Any fix it proposes is re-run through Z3 first — it is applied only if the solver confirms the conflict is gone. Model proposes, solver disposes.</div>` +
+      `<div class="row"><button class="btn sm" id="triage">Ask the model about <code class="tok">${triMus.map((x) => esc(short(x))).join(' · ')}</code></button></div>` +
+      `<div id="triageout"></div></div>`;
+  }
 
   // optimal repair (min total entrenchment) from the driver
   const drop = (drv.repair && drv.repair.drop) || [];
@@ -497,6 +504,7 @@ async function doRefresh() {
   renderTree();
 
   $('#asdefaults')?.addEventListener('click', () => { ruleIds.forEach((id) => engine.set_defeasible(id, true)); refresh(); });
+  $('#triage')?.addEventListener('click', () => triageConflict(triMus));
   $('#applyrep')?.addEventListener('click', () => { drop.forEach((id) => engine.retract(id)); refresh(); });
   field.querySelectorAll('button[data-pos]').forEach((b) => b.onclick = () => {
     JSON.parse(b.dataset.pos).forEach((id) => engine.retract(id)); refresh();
@@ -521,9 +529,32 @@ function extractJSON(text) {
   if (a < 0 || b <= a) throw new Error('no JSON object in the model reply');
   return text.slice(a, b + 1);
 }
+const orModel = () => (($('#ormodel') && $('#ormodel').value) || '').trim()
+  || (loadOR().m) || 'anthropic/claude-sonnet-4';
+const orKey = () => (($('#orkey') && $('#orkey').value) || '').trim() || (loadOR().k) || '';
+// Shared OpenRouter call. Returns the message content or throws.
+async function orCall(prompt) {
+  const key = orKey(), model = orModel();
+  if (!key) throw new Error('no OpenRouter API key');
+  const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': 'Bearer ' + key,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': location.origin,
+      'X-Title': 'world-model-trajectories',
+    },
+    body: JSON.stringify({ model, messages: [{ role: 'user', content: prompt }], temperature: 0 }),
+  });
+  const j = await r.json();
+  if (!r.ok) throw new Error((j.error && (j.error.message || JSON.stringify(j.error))) || ('HTTP ' + r.status));
+  const reply = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+  if (!reply) throw new Error('empty reply: ' + JSON.stringify(j).slice(0, 300));
+  return reply;
+}
+
 async function autoFormalize() {
-  const key = ($('#orkey').value || '').trim();
-  const model = ($('#ormodel').value || '').trim() || 'anthropic/claude-sonnet-4';
+  const key = orKey(), model = orModel();
   const nl = ($('#nl').value || '').trim();
   const stat = $('#orstat'), errs = $('#errs');
   errs.innerHTML = '';
@@ -531,28 +562,9 @@ async function autoFormalize() {
   if (!nl) { stat.textContent = 'enter a claim in Step 1 first'; return; }
   saveOR(key, model);
   stat.innerHTML = `formalizing with ${esc(model)} <span class="spin"></span>`;
-  const prompt = engine.prompt(nl);
   let reply;
-  try {
-    const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + key,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': location.origin,
-        'X-Title': 'world-model-trajectories',
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'user', content: prompt }],
-        temperature: 0,
-      }),
-    });
-    const j = await r.json();
-    if (!r.ok) throw new Error((j.error && (j.error.message || JSON.stringify(j.error))) || ('HTTP ' + r.status));
-    reply = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
-    if (!reply) throw new Error('empty reply: ' + JSON.stringify(j).slice(0, 300));
-  } catch (e) {
+  try { reply = await orCall(engine.prompt(nl)); }
+  catch (e) {
     stat.textContent = '';
     errs.innerHTML = '<div class="errbox">OpenRouter: ' + esc(e.message || e) + '</div>';
     return;
@@ -577,6 +589,56 @@ async function autoFormalize() {
   stat.textContent = 'formalized & ingested — confirm the English renders below';
   $('#json').value = '';
   refresh();
+}
+
+// Increment F — conflict triage (abductive). The model judges whether a
+// minimal conflict is a genuine disagreement or a formalization artifact,
+// and may propose corrected IR. Its proposal is NOT trusted: we apply it
+// to a snapshot, re-run the solver, and only surface an "apply" button if
+// Z3 confirms the conflict actually disappears. Model proposes, solver
+// disposes.
+async function triageConflict(musIds) {
+  const out = $('#triageout');
+  if (!musIds || !musIds.length) { out.innerHTML = '<div class="errbox">no conflict to triage</div>'; return; }
+  out.innerHTML = `<span class="muted small">asking ${esc(orModel())} <span class="spin"></span></span>`;
+  let parsed;
+  try {
+    const reply = await orCall(engine.triage_prompt_json(JSON.stringify(musIds)));
+    parsed = JSON.parse(extractJSON(reply));
+  } catch (e) { out.innerHTML = '<div class="errbox">triage: ' + esc(e.message || e) + '</div>'; return; }
+  const verdict = String(parsed.verdict || '').toLowerCase();
+  const reason = esc(parsed.reason || '(no reason given)');
+  if (verdict === 'intrinsic' || !parsed.fix) {
+    out.innerHTML = `<div class="ovr"><b>genuine disagreement</b> — ${reason}<div class="small muted">The model judges these sentences themselves to conflict; the resolution is yours (a position / repair above).</div></div>`;
+    return;
+  }
+  // formalization claim — verify the model's fix with Z3 before trusting.
+  const fixStr = JSON.stringify(parsed.fix);
+  const snap = engine.export_state();
+  let fixedConsistent = false;
+  try {
+    const ir = JSON.parse(engine.ingest(fixStr));
+    if (ir.ok) {
+      // Verify with the SAME reasoning the app shows: strict, OR — if
+      // the fix turns a claim into a default — the defeasible reading.
+      const lat = await driveLattice();
+      const drv = await driveDriver();
+      fixedConsistent = !!(lat.consistent || drv.status === 'consistent');
+      if (!fixedConsistent) {
+        const df = await driveDefeasible();
+        fixedConsistent = df.status === 'coherent' || df.status === 'defeasibly-coherent';
+      }
+    }
+  } catch (_) {}
+  JSON.parse(engine.import_state(snap)); // always restore; nothing applied yet
+  if (fixedConsistent) {
+    out.innerHTML = `<div class="ovr"><b>mis-formalization</b> — ${reason}` +
+      `<div class="small">Z3 re-checked the model's corrected IR: the conflict disappears. <b>✓ verified</b></div>` +
+      `<div class="row"><button class="btn warm sm" id="applyfix">Apply the verified fix</button></div></div>`;
+    $('#applyfix').onclick = () => { engine.ingest(fixStr); refresh(); };
+  } else {
+    out.innerHTML = `<div class="ovr"><b>model said mis-formalization — but Z3 disagrees</b><div class="small">${reason}<br>Its proposed fix does <b>not</b> remove the conflict, so nothing was changed. The model is never trusted over the solver.</div></div>`;
+  }
 }
 
 function wire() {

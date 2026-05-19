@@ -31,6 +31,7 @@ export class WmtEngine {
     smt_check(): string;
     smt_core(): string;
     smt_entails_json(formula_json: string): string;
+    triage_prompt_json(ids_json: string): string;
     witness_begin(formula_json: string): void;
     witness_feed(z3_out: string): void;
     witness_next(): string;
@@ -69,6 +70,7 @@ export interface InitOutput {
     readonly wmtengine_smt_check: (a: number) => [number, number];
     readonly wmtengine_smt_core: (a: number) => [number, number];
     readonly wmtengine_smt_entails_json: (a: number, b: number, c: number) => [number, number];
+    readonly wmtengine_triage_prompt_json: (a: number, b: number, c: number) => [number, number];
     readonly wmtengine_witness_begin: (a: number, b: number, c: number) => void;
     readonly wmtengine_witness_feed: (a: number, b: number, c: number) => void;
     readonly wmtengine_witness_next: (a: number) => [number, number];

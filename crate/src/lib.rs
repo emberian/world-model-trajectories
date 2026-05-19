@@ -517,6 +517,49 @@ CLAIM(S) TO FORMALIZE:\n\
         )
     }
 
+    /// Triage prompt for a minimal conflict: ask the model whether the
+    /// contradiction is INTRINSIC to the sentences or an artifact the
+    /// FORMALIZATION introduced, and if the latter, a corrected IR
+    /// (same ids) to replace it. The model only *proposes* — the engine
+    /// re-checks the fix with Z3 (the abductive loop is closed by the
+    /// solver, the model is never trusted). Built in the trusted core so
+    /// it is deterministic and testable.
+    fn triage_prompt(&self, ids: &[String]) -> String {
+        let mut block = String::new();
+        for id in ids {
+            if let Some(c) = self.claims.iter().find(|c| &c.id == id) {
+                block.push_str(&format!(
+                    "- id {}\n  sentence: {}\n  reads as: {}\n  IR: {}\n",
+                    c.id,
+                    if c.source.is_empty() { &c.gloss } else { &c.source },
+                    form_en(&c.formula),
+                    serde_json::to_string(&c.formula).unwrap_or_default(),
+                ));
+            }
+        }
+        format!(
+"These claims were found *mutually contradictory* by a theorem prover:\n\
+\n{block}\n\
+Decide ONE thing: is the contradiction INTRINSIC (the sentences\n\
+themselves genuinely disagree — a real belief conflict the user must\n\
+resolve) or FORMALIZATION (the sentences are compatible; a mistranslation\n\
+into logic introduced the clash — e.g. a default read as a hard rule, a\n\
+reused symbol that should differ, a wrong quantifier)?\n\
+\n\
+Return ONLY this JSON:\n\
+{{\"verdict\":\"intrinsic\"|\"formalization\",\n\
+  \"reason\":\"<one sentence, plain English>\",\n\
+  \"fix\":<null, OR an IR object {{\\\"sorts\\\":[],\\\"preds\\\":[],\\\"funcs\\\":[],\\\"claims\\\":[...]}}\n\
+        that REPLACES the mis-formalized claims — reuse the SAME ids,\n\
+        keep \\\"source\\\" verbatim, change only the formula/flags so the\n\
+        sentences no longer falsely clash; null if verdict is intrinsic>}}\n\
+\n\
+Vocabulary in play:\n{}\n\
+No prose, no code fences. JSON only.\n",
+            self.registry_view()
+        )
+    }
+
     fn seed_demo(&mut self) {
         let demo = r#"{"sorts":["Thing"],
           "preds":[
@@ -919,6 +962,12 @@ impl WmtEngine {
         }
     }
     pub fn prompt(&self, nl: &str) -> String { self.core.prompt(nl) }
+    pub fn triage_prompt_json(&self, ids_json: &str) -> String {
+        match serde_json::from_str::<Vec<String>>(ids_json) {
+            Ok(ids) => self.core.triage_prompt(&ids),
+            Err(e) => format!("; bad id list: {e}"),
+        }
+    }
 
     // ---- forkable trajectory tree (C) ------------------------------------
     // Export the whole world-model so the UI can keep a tree of branches
@@ -2113,6 +2162,21 @@ mod tests {
         let mut d = Core::default();
         assert!(d.import_state(&snap));
         assert_eq!(d.meta()["claims"][0]["defeasible"], false);
+    }
+
+    #[test]
+    fn triage_prompt_carries_the_conflict() {
+        // Deterministic (no LLM): the triage prompt must name each
+        // conflicting claim's id, verbatim source, English render and
+        // IR, and ask the intrinsic-vs-formalization question.
+        let mut c = Core::default();
+        c.seed_demo();
+        let p = c.triage_prompt(&["c_birds_fly".into(), "c_tweety_penguin".into()]);
+        assert!(p.contains("id c_birds_fly") && p.contains("id c_tweety_penguin"));
+        assert!(p.contains("Birds can fly.") && p.contains("Tweety is a penguin."));
+        assert!(p.contains("for every") && p.contains("\"op\""), "render + IR present");
+        assert!(p.contains("INTRINSIC") && p.contains("FORMALIZATION"));
+        assert!(p.contains("\"verdict\"") && p.contains("\"fix\""));
     }
 
     #[test]

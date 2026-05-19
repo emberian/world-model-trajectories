@@ -29,6 +29,7 @@ export const wmtengine_set_weight: (a: number, b: number, c: number, d: bigint) 
 export const wmtengine_smt_check: (a: number) => [number, number];
 export const wmtengine_smt_core: (a: number) => [number, number];
 export const wmtengine_smt_entails_json: (a: number, b: number, c: number) => [number, number];
+export const wmtengine_triage_prompt_json: (a: number, b: number, c: number) => [number, number];
 export const wmtengine_witness_begin: (a: number, b: number, c: number) => void;
 export const wmtengine_witness_feed: (a: number, b: number, c: number) => void;
 export const wmtengine_witness_next: (a: number) => [number, number];

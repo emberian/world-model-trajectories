@@ -134,6 +134,21 @@ honest UX of the seam.
   won the race; CI's slower Chromium failed correctly; fixed by
   capturing the summary synchronously. In the commit history, not
   hidden.
+- **Conflict triage — real disagreement vs. mis-formalization**
+  (abductive; "model proposes, solver disposes"). On a minimal
+  conflict, your model judges whether the clash is intrinsic to the
+  *sentences* or an artifact the *formalization* introduced, and may
+  propose corrected IR. That proposal is **not trusted**: it is applied
+  to a snapshot and re-checked with Z3 *under the same reasoning the app
+  shows* (strict or defeasible); the "apply" button appears only if the
+  solver confirms the conflict is actually gone. The triage prompt is
+  built in the trusted Rust core and tested deterministically; the live
+  LLM round-trip is the external seam (gated on an OpenRouter key, never
+  shown without one — a tested invariant) and, like auto-formalize, is
+  deliberately not claimed as CI-verified. Verified live by hand on
+  `nvidia/nemotron-3-super-120b` against the deployed stack: both the
+  "intrinsic → yours to resolve" and "formalization → Z3 re-checks"
+  branches behave correctly and never silently trust the model.
 - **Defeasible / prioritized reasoning** (Poole specificity + Brewka
   preferred subtheory). Mark a claim a *default*; a "contradiction"
   that is really a general rule with a more-specific exception (the

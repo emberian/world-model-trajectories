@@ -67,6 +67,7 @@ console.log('· argumentation: attack graph + skeptical/contested/defeated + hon
 
 // 3b. defeasible reading (Increment E): the penguin is a default with a
 //     more-specific exception, NOT a contradiction. One click reframes it.
+if (await page.$('#triage')) fail('conflict-triage (off-tab) must not appear without an OpenRouter key');
 if (!(await page.$('#asdefaults'))) fail('defeasible affordance missing on a rule conflict');
 await page.click('#asdefaults');
 await page.waitForFunction(() => /default was overridden/i.test(document.querySelector('#status')?.textContent || ''), null, { timeout: 90000 }).catch(() => fail('treating rules as defaults did not reframe the contradiction'));
