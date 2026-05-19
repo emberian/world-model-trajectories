@@ -55,6 +55,15 @@ async function driveLattice() {
   }
   return JSON.parse(engine.lattice_result());
 }
+async function driveDefeasible() {
+  engine.defeasible_begin();
+  let g = 0;
+  for (let s = engine.defeasible_next(); s; s = engine.defeasible_next()) {
+    engine.defeasible_feed(await run(s));
+    if (++g > 800) break;
+  }
+  return JSON.parse(engine.defeasible_result());
+}
 async function driveWitness(formulaObj) {
   engine.witness_begin(JSON.stringify(formulaObj));
   let g = 0;
@@ -84,6 +93,7 @@ function renderClaims(statusOf) {
       `<div class="foot">` +
       `<span class="cid">${esc(c.id)}</span>` +
       `<span class="wt">w<input type="number" min="1" max="99" value="${c.weight}" data-w="${esc(c.id)}"></span>` +
+      `<label class="dfz" title="a default — may be overridden by a more-specific or higher-priority claim instead of contradicting"><input type="checkbox" data-d="${esc(c.id)}"${c.defeasible ? ' checked' : ''}>default</label>` +
       `<span class="dot ${c.active ? st : 'inactive'}" title="${st}"></span>` +
       (c.active
         ? `<button class="btn tiny ghost" data-a="retract" data-id="${esc(c.id)}">retract</button>`
@@ -101,6 +111,9 @@ function renderClaims(statusOf) {
   });
   box.querySelectorAll('input[data-w]').forEach((i) => i.onchange = () => {
     engine.set_weight(i.dataset.w, parseInt(i.value, 10) || 1); refresh();
+  });
+  box.querySelectorAll('input[data-d]').forEach((i) => i.onchange = () => {
+    engine.set_defeasible(i.dataset.d, i.checked); refresh();
   });
 }
 
@@ -322,7 +335,20 @@ async function forced() {
       `</div>` : '';
 }
 
+// Z3-wasm runs one async session at a time; a click during an in-flight
+// analysis would start a second and crash it. Serialize: at most one
+// refresh runs; the latest requested state re-runs once it finishes.
+let _refreshing = false, _rerun = false;
 async function refresh() {
+  if (_refreshing) { _rerun = true; return; }
+  _refreshing = true;
+  try { await doRefresh(); }
+  finally {
+    _refreshing = false;
+    if (_rerun) { _rerun = false; refresh(); }
+  }
+}
+async function doRefresh() {
   META = JSON.parse(engine.meta());
   renderClaims(null);
   const status = $('#status'), field = $('#field');
@@ -378,6 +404,40 @@ async function refresh() {
     return;
   }
 
+  // Defeasible reading: if any active claim is a default, a "conflict"
+  // may just be a default overridden by a more-specific / higher-priority
+  // claim. Specificity is derived from the user's OWN strict claims
+  // (Poole) and the survivors are a Brewka preferred subtheory — all
+  // checked by Z3, none hand-ranked. Strict-only conflicts are NOT
+  // rescued (honest): then we fall through to the hard view.
+  const anyDef = META.claims.some((c) => c.active && c.defeasible);
+  if (anyDef) {
+    const df = await driveDefeasible();
+    const rOf = (id) => { const c = META.claims.find((x) => x.id === id); return c ? (c.source || c.render || id) : id; };
+    if (df.status === 'coherent' || df.status === 'defeasibly-coherent') {
+      const soft = df.status === 'defeasibly-coherent';
+      status.className = 'statusbar ok';
+      status.innerHTML = `<span class="big">${soft ? 'coherent — a default was overridden' : 'coherent'}</span><span>${soft
+        ? 'not a contradiction: the specific beats the general, derived from your own claims.'
+        : 'every claim (defaults included) holds together.'}</span>`;
+      let h = '';
+      if (soft) {
+        h += `<div class="fieldlabel">Defaults overridden · the specific beats the general</div>`;
+        df.overridden.forEach((o) => {
+          const by = (o.by || []).map((b) => `<code class="tok">${esc(short(b))}</code>`).join(' · ');
+          h += `<div class="ovr"><b>${esc(short(o.id))}</b> — <span class="muted">“${esc(rOf(o.id))}”</span><div class="small">overridden by ${by || 'the surviving position'} ${df.specificity.some(([m, l]) => l === o.id) ? '<span class="muted">(more specific — entailed by your strict claims)</span>' : '<span class="muted">(higher entrenchment)</span>'}</div></div>`;
+        });
+        h += `<div class="fieldlabel">Held position · the preferred subtheory</div><div class="pos"><div class="keeps small">${df.position.map((p) => `<code class="tok">${esc(short(p))}</code>`).join(' · ')}</div></div>`;
+        h += `<p class="small muted">Poole specificity + Brewka preferred subtheory, every step checked by Z3. Mark a claim strict (uncheck “default”) to forbid overriding it. Strict-only contradictions are never papered over.</p>`;
+      }
+      LAST.summary = { status: 'coherent', kept: active.length, conflicts: 0, positions: 1, skeptical: df.position.slice(), contested: [], defeated: df.overridden.map((o) => o.id) };
+      renderTree();
+      field.innerHTML = h + (await forced());
+      return;
+    }
+    // df.status === 'inconsistent' → strict core genuinely conflicts
+  }
+
   // inconsistent
   status.className = 'statusbar bad';
   status.innerHTML = `<span class="big">inconsistent</span><span>${lat.capped
@@ -386,6 +446,15 @@ async function refresh() {
 
   const muses = lat.capped ? [drv.mus || []] : lat.mus;
   let html = svgField(active, muses);
+
+  // Offer the defeasible lens: many "contradictions" in a world-model
+  // are really a general rule with a specific exception (the penguin).
+  const ruleIds = META.claims.filter((c) => c.active && /^for every/.test(c.render || '')).map((c) => c.id);
+  if (ruleIds.length >= 2 && !anyDef) {
+    html += `<div class="pos suggested"><h4>Is this really a contradiction?</h4>` +
+      `<div class="keeps small">If some of these are <em>defaults</em> (“birds fly”) with a more-specific exception (“penguins don’t”), this isn’t inconsistent — the specific overrides the general. Specificity is derived from your own strict claims, not hand-ranked.</div>` +
+      `<div class="row"><button class="btn warm sm" id="asdefaults">Treat the universal rules as defaults</button></div></div>`;
+  }
 
   // optimal repair (min total entrenchment) from the driver
   const drop = (drv.repair && drv.repair.drop) || [];
@@ -427,6 +496,7 @@ async function refresh() {
   field.innerHTML = html;
   renderTree();
 
+  $('#asdefaults')?.addEventListener('click', () => { ruleIds.forEach((id) => engine.set_defeasible(id, true)); refresh(); });
   $('#applyrep')?.addEventListener('click', () => { drop.forEach((id) => engine.retract(id)); refresh(); });
   field.querySelectorAll('button[data-pos]').forEach((b) => b.onclick = () => {
     JSON.parse(b.dataset.pos).forEach((id) => engine.retract(id)); refresh();

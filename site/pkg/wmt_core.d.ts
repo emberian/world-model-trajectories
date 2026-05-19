@@ -8,6 +8,10 @@ export class WmtEngine {
     analyze_feed(z3_out: string): void;
     analyze_next(): string;
     analyze_result(): string;
+    defeasible_begin(): void;
+    defeasible_feed(z3_out: string): void;
+    defeasible_next(): string;
+    defeasible_result(): string;
     export_state(): string;
     import_state(json: string): string;
     ingest(json: string): string;
@@ -22,6 +26,7 @@ export class WmtEngine {
     remove(id: string): string;
     retract(id: string): string;
     seed_demo(): string;
+    set_defeasible(id: string, d: boolean): string;
     set_weight(id: string, w: bigint): string;
     smt_check(): string;
     smt_core(): string;
@@ -41,6 +46,10 @@ export interface InitOutput {
     readonly wmtengine_analyze_feed: (a: number, b: number, c: number) => void;
     readonly wmtengine_analyze_next: (a: number) => [number, number];
     readonly wmtengine_analyze_result: (a: number) => [number, number];
+    readonly wmtengine_defeasible_begin: (a: number) => void;
+    readonly wmtengine_defeasible_feed: (a: number, b: number, c: number) => void;
+    readonly wmtengine_defeasible_next: (a: number) => [number, number];
+    readonly wmtengine_defeasible_result: (a: number) => [number, number];
     readonly wmtengine_export_state: (a: number) => [number, number];
     readonly wmtengine_import_state: (a: number, b: number, c: number) => [number, number];
     readonly wmtengine_ingest: (a: number, b: number, c: number) => [number, number];
@@ -55,6 +64,7 @@ export interface InitOutput {
     readonly wmtengine_remove: (a: number, b: number, c: number) => [number, number];
     readonly wmtengine_retract: (a: number, b: number, c: number) => [number, number];
     readonly wmtengine_seed_demo: (a: number) => [number, number];
+    readonly wmtengine_set_defeasible: (a: number, b: number, c: number, d: number) => [number, number];
     readonly wmtengine_set_weight: (a: number, b: number, c: number, d: bigint) => [number, number];
     readonly wmtengine_smt_check: (a: number) => [number, number];
     readonly wmtengine_smt_core: (a: number) => [number, number];

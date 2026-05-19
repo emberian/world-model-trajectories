@@ -143,6 +143,11 @@ h1 em{font-style:italic;color:var(--moss)}
 .forced{font-family:var(--mono);font-size:.84rem;background:color-mix(in oklab,var(--lantern) 12%,var(--cream));
   border:1px dashed var(--bark);border-radius:var(--r2);padding:var(--s3) var(--s4)}
 code.tok{background:color-mix(in oklab,var(--ink) 7%,transparent);padding:1px 5px;border-radius:4px}
+.claim .dfz{display:inline-flex;align-items:center;gap:3px;font-family:var(--mono);font-size:.72rem;color:var(--fg3);cursor:pointer}
+.claim .dfz input{margin:0;cursor:pointer}
+.ovr{font-family:var(--mono);font-size:.82rem;background:color-mix(in oklab,var(--lantern) 10%,var(--cream));
+  border:1px solid color-mix(in oklab,var(--lantern) 32%,transparent);border-radius:var(--r2);
+  padding:var(--s2) var(--s3);margin:var(--s2) 0}
 
 /* the loop, demoted to a drawer */
 .loop{margin:var(--s5) 0;border:1px solid var(--line);border-radius:var(--r);background:var(--card)}

@@ -52,6 +52,47 @@ export class WmtEngine {
             wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
         }
     }
+    defeasible_begin() {
+        wasm.wmtengine_defeasible_begin(this.__wbg_ptr);
+    }
+    /**
+     * @param {string} z3_out
+     */
+    defeasible_feed(z3_out) {
+        const ptr0 = passStringToWasm0(z3_out, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wmtengine_defeasible_feed(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
+     * @returns {string}
+     */
+    defeasible_next() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wmtengine_defeasible_next(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    defeasible_result() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wmtengine_defeasible_result(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
     /**
      * @returns {string}
      */
@@ -250,6 +291,25 @@ export class WmtEngine {
             return getStringFromWasm0(ret[0], ret[1]);
         } finally {
             wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @param {string} id
+     * @param {boolean} d
+     * @returns {string}
+     */
+    set_defeasible(id, d) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.wmtengine_set_defeasible(this.__wbg_ptr, ptr0, len0, d);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
         }
     }
     /**

@@ -134,6 +134,21 @@ honest UX of the seam.
   won the race; CI's slower Chromium failed correctly; fixed by
   capturing the summary synchronously. In the commit history, not
   hidden.
+- **Defeasible / prioritized reasoning** (Poole specificity + Brewka
+  preferred subtheory). Mark a claim a *default*; a "contradiction"
+  that is really a general rule with a more-specific exception (the
+  penguin) is reframed as *a default overridden*, not an inconsistency.
+  Specificity is **derived from the user's own strict claims**, not
+  hand-ranked ("penguins are birds" is what makes "penguin" beat
+  "bird"), every step Z3-checked; strict-only conflicts are *never*
+  papered over (a tested invariant). 21 native tests now (+3:
+  specificity-from-own-KB, no-rescue-of-strict-contradiction, flag
+  default+round-trip). Surfaced in-product, with its scope (auto-
+  specificity only for `∀x.(Pred(x) ⇒ …)`) stated honestly.
+- The serialized-refresh fix that the defeasible e2e step forced also
+  closed a real latent concurrency bug: a click during an in-flight
+  Z3 analysis started a second wasm session and crashed it. Found by
+  the real-browser e2e, in the commit history, not hidden.
 - **Optional auto-formalize (OpenRouter, bring-your-own-key)** closes
   the no-manual-intervention gap: your model formalizes, the engine
   ingests, Z3 analyzes, in one click. It does *not* weaken the seam —

@@ -65,6 +65,31 @@ console.log('· inconsistent: SVG + positions + disagreements + optimal repair +
 }
 console.log('· argumentation: attack graph + skeptical/contested/defeated + honest Dung note');
 
+// 3b. defeasible reading (Increment E): the penguin is a default with a
+//     more-specific exception, NOT a contradiction. One click reframes it.
+if (!(await page.$('#asdefaults'))) fail('defeasible affordance missing on a rule conflict');
+await page.click('#asdefaults');
+await page.waitForFunction(() => /default was overridden/i.test(document.querySelector('#status')?.textContent || ''), null, { timeout: 90000 }).catch(() => fail('treating rules as defaults did not reframe the contradiction'));
+await page.waitForFunction(() => /Defaults overridden/.test(document.querySelector('#field')?.textContent || ''), null, { timeout: 90000 }).catch(() => fail('overridden-defaults section never rendered'));
+{
+  const f = await page.$eval('#field', (e) => e.textContent);
+  if (!/Defaults overridden/.test(f)) fail('no overridden-defaults section');
+  if (!/birds fly/.test(f)) fail('the general rule (birds fly) should be the overridden default: ' + f.slice(0, 160));
+  if (!/Held position|preferred subtheory/.test(f)) fail('no held-position / preferred-subtheory shown');
+}
+console.log('· defeasible: rule conflict reframed as a default overridden (Poole+Brewka, Z3-checked)');
+// revert to the strict (inconsistent) reading so the rest of the flow
+// stands. Each toggle re-renders #claims, so click one, wait for the
+// checked-count to drop, repeat — never iterate a stale NodeList.
+for (let g = 0; g < 12; g++) {
+  const n = await page.$$eval('#claims input[data-d]:checked', (e) => e.length);
+  if (n === 0) break;
+  await page.click('#claims input[data-d]:checked');
+  await page.waitForFunction((prev) => document.querySelectorAll('#claims input[data-d]:checked').length < prev, n, { timeout: 90000 }).catch(() => fail('default toggle did not take'));
+}
+await page.waitForFunction(() => /inconsistent/i.test(document.querySelector('#status')?.textContent || ''), null, { timeout: 90000 }).catch(() => fail('unchecking defaults did not restore the strict inconsistent reading'));
+console.log('· defeasible revert: strict reading restored (defaults never paper over real conflicts)');
+
 // 4. forkable trajectory tree (Increment C): save this (inconsistent)
 //    state as a branch, deterministic from a cleared tree.
 await page.evaluate(() => { try { localStorage.removeItem('wmt.tree.v2'); } catch (_) {} });

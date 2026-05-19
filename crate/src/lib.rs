@@ -102,6 +102,12 @@ pub struct Claim {
     pub weight: i64, // epistemic entrenchment (higher = harder to give up)
     #[serde(default = "dtrue")]
     pub active: bool,
+    /// A *default*, not a strict axiom: it may be overridden by a
+    /// higher-priority or logically more-specific claim instead of
+    /// counting as a contradiction. Default false = strict (so all
+    /// pre-existing behaviour and tests are unchanged).
+    #[serde(default)]
+    pub defeasible: bool,
 }
 
 #[derive(Deserialize)]
@@ -589,6 +595,7 @@ CLAIM(S) TO FORMALIZE:\n\
                 "id": c.id, "source": c.source, "gloss": c.gloss,
                 "render": form_en(&c.formula), "back": c.back,
                 "weight": c.weight, "active": c.active,
+                "defeasible": c.defeasible,
             })).collect::<Vec<_>>(),
             "vocab": self.registry_view(),
             "bool_atoms": self.preds.values()
@@ -872,13 +879,14 @@ pub struct WmtEngine {
     drv: Option<Driver>,
     lat: Option<Lattice>,
     wit: Option<WitnessDriver>,
+    dfz: Option<DefeasibleDriver>,
 }
 
 #[wasm_bindgen]
 impl WmtEngine {
     #[wasm_bindgen(constructor)]
     pub fn new() -> WmtEngine {
-        WmtEngine { core: Core::default(), drv: None, lat: None, wit: None }
+        WmtEngine { core: Core::default(), drv: None, lat: None, wit: None, dfz: None }
     }
     pub fn ingest(&mut self, json: &str) -> String {
         let (ok, errors) = self.core.ingest(json);
@@ -923,7 +931,12 @@ impl WmtEngine {
         self.drv = None;
         self.lat = None;
         self.wit = None;
+        self.dfz = None;
         serde_json::json!({"ok": ok, "meta": self.core.meta()}).to_string()
+    }
+    pub fn set_defeasible(&mut self, id: &str, d: bool) -> String {
+        if let Some(c) = self.core.claims.iter_mut().find(|c| c.id == id) { c.defeasible = d; }
+        self.core.meta().to_string()
     }
 
     // ---- analysis step driver (status + minimal conflict + optimal repair)
@@ -1000,6 +1013,21 @@ impl WmtEngine {
             .as_ref()
             .map(|w| w.result().to_string())
             .unwrap_or_else(|| "{}".into())
+    }
+
+    // ---- defeasible / prioritized reasoning (E) --------------------------
+    pub fn defeasible_begin(&mut self) { self.dfz = Some(DefeasibleDriver::new(&self.core)); }
+    pub fn defeasible_next(&self) -> String {
+        self.dfz.as_ref().and_then(|d| d.next_script(&self.core)).unwrap_or_default()
+    }
+    pub fn defeasible_feed(&mut self, z3_out: &str) {
+        if let Some(d) = self.dfz.as_mut() {
+            let core = &self.core;
+            d.feed(core, z3_out);
+        }
+    }
+    pub fn defeasible_result(&self) -> String {
+        self.dfz.as_ref().map(|d| d.result().to_string()).unwrap_or_else(|| "{}".into())
     }
 }
 
@@ -1319,6 +1347,241 @@ impl WitnessDriver {
             "status": self.status,
             "entailed": self.status == "entailed",
             "witness": self.witness,
+        })
+    }
+}
+
+// ---- defeasible / prioritized reasoning ----------------------------------
+// A world model with defaults ("birds fly") and exceptions ("penguins
+// don't") is NOT inconsistent — the specific overrides the general. We
+// implement Poole-style logical specificity (computed from the user's
+// OWN strict claims, not hand-ranked) on top of a Brewka preferred-
+// subtheory: process defaults best-first (more specific, then more
+// entrenched), keep each only while it stays consistent. What gets
+// skipped is an *overridden default*, reported as such — not a conflict.
+//
+// Scope, stated honestly (also surfaced in-product): specificity is
+// auto-detected only for the single-antecedent universally-quantified
+// rule shape  ∀x. (Pred(x) ⇒ …).  For anything else the priority is the
+// entrenchment weight. Strict claims that conflict among themselves are
+// still a genuine inconsistency — defeasibility never rescues those.
+
+fn antecedent_pred(f: &Formula) -> Option<(String, String)> {
+    if let Formula::Forall { vars, body } = f {
+        if vars.len() == 1 {
+            if let Formula::Imp { a, .. } = body.as_ref() {
+                if let Formula::Pred { name, args } = a.as_ref() {
+                    if let [Term::Var { name: vn }] = args.as_slice() {
+                        if *vn == vars[0].name {
+                            return Some((name.clone(), vars[0].sort.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+impl Core {
+    fn priority_of(&self, id: &str) -> i64 {
+        self.weight_of(id)
+    }
+    /// Is the antecedent of rule `ai` (predicate `pa` over sort `s`)
+    /// logically *more specific* than that of `aj` (predicate `pb`),
+    /// given the STRICT claims as background? i.e. strict ∧ pa(k) ⊨ pb(k)
+    /// for a fresh k. Unsat ⇒ pa ⊑ pb.
+    fn smt_more_specific(&self, pa: &str, pb: &str, sort: &str) -> String {
+        let mut s = String::from("(set-logic ALL)\n");
+        s.push_str(&self.decls_smt());
+        for &i in &self.active() {
+            if !self.claims[i].defeasible {
+                s.push_str(&format!("(assert {})\n", form_smt(&self.claims[i].formula)));
+            }
+        }
+        s.push_str(&format!("(declare-const __k {sort})\n"));
+        s.push_str(&format!("(assert ({pa} __k))\n"));
+        s.push_str(&format!("(assert (not ({pb} __k)))\n"));
+        s.push_str("(check-sat)\n");
+        s
+    }
+}
+
+enum DPhase {
+    Strict,
+    Spec { pairs: Vec<(usize, usize)>, i: usize },
+    Brewka { order: Vec<String>, i: usize },
+    Done,
+}
+
+struct DefeasibleDriver {
+    strict: Vec<String>,
+    defs: Vec<String>,                 // defeasible claim ids
+    ant: BTreeMap<String, (String, String)>, // id -> (pred, sort)
+    spec: Vec<(String, String)>,       // (more_specific_id, less_specific_id)
+    accepted: Vec<String>,
+    overridden: Vec<String>,
+    phase: DPhase,
+    status: String, // coherent | defeasibly-coherent | inconsistent
+}
+
+impl DefeasibleDriver {
+    fn new(core: &Core) -> DefeasibleDriver {
+        let mut strict = Vec::new();
+        let mut defs = Vec::new();
+        let mut ant = BTreeMap::new();
+        for &i in &core.active() {
+            let c = &core.claims[i];
+            if c.defeasible {
+                defs.push(c.id.clone());
+                if let Some(a) = antecedent_pred(&c.formula) {
+                    ant.insert(c.id.clone(), a);
+                }
+            } else {
+                strict.push(c.id.clone());
+            }
+        }
+        DefeasibleDriver {
+            strict,
+            defs,
+            ant,
+            spec: Vec::new(),
+            accepted: Vec::new(),
+            overridden: Vec::new(),
+            phase: DPhase::Strict,
+            status: String::new(),
+        }
+    }
+    fn spec_pairs(&self) -> Vec<(usize, usize)> {
+        let mut v = Vec::new();
+        for a in 0..self.defs.len() {
+            for b in 0..self.defs.len() {
+                if a != b
+                    && self.ant.contains_key(&self.defs[a])
+                    && self.ant.contains_key(&self.defs[b])
+                {
+                    v.push((a, b));
+                }
+            }
+        }
+        v
+    }
+    fn next_script(&self, core: &Core) -> Option<String> {
+        match &self.phase {
+            DPhase::Strict => Some(core.smt_assume(&self.strict)),
+            DPhase::Spec { pairs, i } => {
+                let (a, b) = pairs[*i];
+                let (pa, s) = &self.ant[&self.defs[a]];
+                let (pb, _) = &self.ant[&self.defs[b]];
+                Some(core.smt_more_specific(pa, pb, s))
+            }
+            DPhase::Brewka { order, i } => {
+                let mut keep = self.strict.clone();
+                keep.extend(self.accepted.iter().cloned());
+                keep.push(order[*i].clone());
+                Some(core.smt_assume(&keep))
+            }
+            DPhase::Done => None,
+        }
+    }
+    fn feed(&mut self, core: &Core, out: &str) {
+        let h = z3_head(out);
+        match std::mem::replace(&mut self.phase, DPhase::Done) {
+            DPhase::Strict => {
+                if h.starts_with("unsat") {
+                    self.status = "inconsistent".into(); // strict core conflicts
+                    self.phase = DPhase::Done;
+                } else if self.defs.is_empty() {
+                    self.status = "coherent".into();
+                    self.accepted = self.strict.clone();
+                    self.phase = DPhase::Done;
+                } else {
+                    let pairs = self.spec_pairs();
+                    self.phase = if pairs.is_empty() {
+                        DPhase::Brewka { order: self.ranked(core), i: 0 }
+                    } else {
+                        DPhase::Spec { pairs, i: 0 }
+                    };
+                }
+            }
+            DPhase::Spec { pairs, i } => {
+                if h.starts_with("unsat") {
+                    let (a, b) = pairs[i];
+                    // a's antecedent ⊑ b's: a is the more specific rule
+                    self.spec
+                        .push((self.defs[a].clone(), self.defs[b].clone()));
+                }
+                let ni = i + 1;
+                self.phase = if ni < pairs.len() {
+                    DPhase::Spec { pairs, i: ni }
+                } else {
+                    DPhase::Brewka { order: self.ranked(core), i: 0 }
+                };
+            }
+            DPhase::Brewka { order, i } => {
+                if h.starts_with("sat") {
+                    self.accepted.push(order[i].clone());
+                } else {
+                    self.overridden.push(order[i].clone());
+                }
+                let ni = i + 1;
+                if ni < order.len() {
+                    self.phase = DPhase::Brewka { order, i: ni };
+                } else {
+                    let mut acc = self.strict.clone();
+                    acc.extend(self.accepted.iter().cloned());
+                    self.accepted = acc;
+                    self.status = if self.overridden.is_empty() {
+                        "coherent".into()
+                    } else {
+                        "defeasibly-coherent".into()
+                    };
+                    self.phase = DPhase::Done;
+                }
+            }
+            DPhase::Done => {}
+        }
+    }
+    fn ranked(&self, core: &Core) -> Vec<String> {
+        let depth = |id: &String| self.spec.iter().filter(|(m, _)| m == id).count() as i64;
+        let mut o = self.defs.clone();
+        o.sort_by(|x, y| {
+            depth(y)
+                .cmp(&depth(x))
+                .then_with(|| core.priority_of(y).cmp(&core.priority_of(x)))
+                .then_with(|| x.cmp(y))
+        });
+        o
+    }
+    fn result(&self) -> serde_json::Value {
+        // for each overridden default, which accepted claims beat it:
+        // its more-specific siblings if any, else the accepted set it
+        // could not join.
+        let beaten_by: Vec<serde_json::Value> = self
+            .overridden
+            .iter()
+            .map(|o| {
+                let mut by: Vec<String> = self
+                    .spec
+                    .iter()
+                    .filter(|(m, l)| l == o && self.accepted.contains(m))
+                    .map(|(m, _)| m.clone())
+                    .collect();
+                if by.is_empty() {
+                    by = self.accepted.clone();
+                }
+                serde_json::json!({ "id": o, "by": by })
+            })
+            .collect();
+        serde_json::json!({
+            "status": self.status,
+            "strict_inconsistent": self.status == "inconsistent",
+            "position": self.accepted,
+            "overridden": beaten_by,
+            "specificity": self.spec
+                .iter().map(|(m, l)| vec![m.clone(), l.clone()])
+                .collect::<Vec<_>>(),
+            "done": matches!(self.phase, DPhase::Done),
         })
     }
 }
@@ -1767,6 +2030,89 @@ mod tests {
             "in a coherent world-model every claim is skeptically accepted"
         );
         assert!(af["defeated"].as_array().unwrap().is_empty());
+    }
+
+    fn defeasible(c: &Core) -> serde_json::Value {
+        let mut d = DefeasibleDriver::new(c);
+        let mut g = 0;
+        while let Some(s) = d.next_script(c) {
+            let o = match z3(&s) { Some(o) => o, None => return serde_json::json!({"skip": true}) };
+            d.feed(c, &o);
+            g += 1;
+            assert!(g < 500, "defeasible driver did not terminate");
+        }
+        d.result()
+    }
+
+    #[test]
+    fn defeasible_penguin_specificity_from_own_kb() {
+        // Penguin world-model, but the two RULES are defaults; the facts
+        // ("every penguin is a bird", "Tweety is a penguin") stay strict.
+        // Nothing is hand-ranked: specificity is DERIVED from the user's
+        // own strict claim that penguins are birds, so "penguins don't
+        // fly" beats "birds fly". Result: not a contradiction — a default
+        // overridden.
+        let mut c = Core::default();
+        c.seed_demo();
+        c.ingest(
+            r#"{"claims":[{"id":"c_pen_nofly","weight":1,"defeasible":true,
+              "formula":{"op":"forall","vars":[{"name":"x","sort":"Thing"}],
+                "body":{"op":"imp",
+                  "a":{"op":"pred","name":"Penguin","args":[{"t":"var","name":"x"}]},
+                  "b":{"op":"not","x":{"op":"pred","name":"Flies","args":[{"t":"var","name":"x"}]}}}}}]}"#,
+        );
+        c.claims.iter_mut().find(|x| x.id == "c_birds_fly").unwrap().defeasible = true;
+        let r = defeasible(&c);
+        if r.get("skip").is_some() {
+            return;
+        }
+        assert_eq!(r["status"], "defeasibly-coherent", "{r}");
+        let ov: Vec<String> = r["overridden"].as_array().unwrap()
+            .iter().map(|o| o["id"].as_str().unwrap().to_string()).collect();
+        assert_eq!(ov, vec!["c_birds_fly"], "the GENERAL rule is the one overridden");
+        let pos: Vec<String> = r["position"].as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        assert!(pos.contains(&"c_pen_nofly".to_string()), "the specific rule survives");
+        // and the specificity edge was logically derived, not declared
+        let spec = as_sets(&r["specificity"]);
+        assert!(
+            spec.iter().any(|e| e == &vec!["c_birds_fly".to_string(), "c_pen_nofly".to_string()]
+                || e == &vec!["c_pen_nofly".to_string(), "c_birds_fly".to_string()]),
+            "penguin⊑bird specificity must be derived from the KB: {spec:?}"
+        );
+    }
+
+    #[test]
+    fn defeasible_does_not_rescue_strict_contradiction() {
+        // {P, ¬P} both STRICT → still a genuine inconsistency; the
+        // defeasible reading must NOT paper over it.
+        let mut c = Core::default();
+        c.ingest(
+            r#"{"preds":[{"name":"P","args":[],"gloss":"p"}],
+              "claims":[
+               {"id":"c_p","formula":{"op":"pred","name":"P","args":[]}},
+               {"id":"c_np","formula":{"op":"not","x":{"op":"pred","name":"P","args":[]}}}]}"#,
+        );
+        let r = defeasible(&c);
+        if r.get("skip").is_some() {
+            return;
+        }
+        assert_eq!(r["status"], "inconsistent");
+        assert_eq!(r["strict_inconsistent"], true);
+    }
+
+    #[test]
+    fn defeasible_flag_defaults_false_and_round_trips() {
+        let mut c = Core::default();
+        assert!(c.ingest(
+            r#"{"preds":[{"name":"P","args":[],"gloss":"p"}],
+              "claims":[{"id":"c1","formula":{"op":"pred","name":"P","args":[]}}]}"#
+        ).0);
+        assert_eq!(c.meta()["claims"][0]["defeasible"], false);
+        let snap = c.export_state();
+        let mut d = Core::default();
+        assert!(d.import_state(&snap));
+        assert_eq!(d.meta()["claims"][0]["defeasible"], false);
     }
 
     #[test]
