@@ -1080,19 +1080,24 @@ impl WmtEngine {
     }
 }
 
-// ---- full coherence lattice ----------------------------------------------
-// Enumerate ALL minimal conflicts (MUSes) by increasing-size subset search
-// with superset pruning — correct because, processing sizes ascending and
-// skipping any candidate that already contains a found MUS, an unsatisfiable
-// candidate that survives pruning has no unsatisfiable proper subset, i.e.
-// it IS minimal. Maximal coherent positions (MSSes) and the ways out
-// (MCSes) follow by Reiter/Liffiton–Sakallah duality: MCS = the minimal
-// hitting sets of the MUS collection; MSS = its complement. Exact for the
-// demo regime; capped (the UI falls back to the single-conflict driver for
-// large sets, stated honestly, never silently truncated).
+// ---- full coherence lattice (MARCO) --------------------------------------
+// Enumerate every minimal conflict (MUS) and every maximal coherent
+// position (MSS, complement = MCS) with the MARCO algorithm
+// (Liffiton–Previti–Malik–Marques-Silva): a propositional *map* over one
+// selector bit per active claim records the regions of the power set
+// already explained. Each round: get a model of the map (a seed); ask Z3
+// whether that subset of claims is consistent; if SAT, *grow* it to an
+// MSS and block its down-set; if UNSAT, *shrink* it to an MUS and block
+// its up-set. The map strictly shrinks each round, so this terminates
+// having enumerated every MUS and MCS exactly — no subset-size blowup,
+// no n≤10 cap. Cost is dominated by (#MUS + #MCS), each a handful of Z3
+// calls; an honest budget stops pathological cases and is reported as
+// "not exhaustive" rather than silently truncated. The argumentation
+// view is still derived (not re-solved) from the result.
 
-const LAT_CAP: usize = 10;
+const LAT_BUDGET: usize = 240; // max (#MUS + #MCS) before "not exhaustive"
 
+#[allow(dead_code)] // kept as an independent Reiter-duality test oracle
 fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
     let mut res = Vec::new();
     if k == 0 || k > n {
@@ -1118,6 +1123,7 @@ fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
     }
 }
 
+#[allow(dead_code)] // independent oracle: MCS == minimal hitting sets of MUS
 fn minimal_hitting_sets(sets: &[Vec<String>], universe: &[String]) -> Vec<Vec<String>> {
     if sets.is_empty() {
         return Vec::new();
@@ -1199,80 +1205,227 @@ fn argumentation(muses: &[Vec<String>], mss: &[Vec<String>], active: &[String]) 
     Af { attacks, skeptical, credulous, defeated }
 }
 
+fn parse_bool_model(out: &str, n: usize) -> Vec<bool> {
+    // Z3 get-value: ((m0 true) (m1 false) ...), any whitespace/newlines.
+    let mut v = vec![false; n];
+    let cleaned = out.replace('(', " ").replace(')', " ");
+    let toks: Vec<&str> = cleaned.split_whitespace().collect();
+    let mut i = 0;
+    while i + 1 < toks.len() {
+        if let Some(idx) = toks[i].strip_prefix('m').and_then(|d| d.parse::<usize>().ok()) {
+            if idx < n {
+                v[idx] = toks[i + 1] == "true";
+            }
+        }
+        i += 1;
+    }
+    v
+}
+
+#[derive(Clone)]
+enum MPhase {
+    CheckAll,
+    MapQuery,
+    CheckSeed { seed: Vec<usize> },
+    Grow { keep: Vec<usize>, rest: Vec<usize>, i: usize },
+    Shrink { cand: Vec<usize>, i: usize },
+    Done,
+}
+
 struct Lattice {
-    active: Vec<String>,
-    capped: bool,
-    queue: Vec<Vec<String>>,
-    qi: usize,
-    muses: Vec<Vec<String>>,
+    active: Vec<String>,        // index = selector bit
+    capped: bool,               // true ⇒ budget hit, NOT exhaustive (honest)
+    unknown: bool,              // Z3 said `unknown` — never claim consistent
+    map: Vec<Vec<i32>>,         // CNF over bits: +k ⇒ bit k-1 true, -k ⇒ false
+    muses: Vec<Vec<usize>>,
+    mcses: Vec<Vec<usize>>,
+    phase: MPhase,
     out: LatOut,
 }
 
 impl Lattice {
     fn new(core: &Core) -> Lattice {
         let active = core.active_ids();
-        let n = active.len();
-        let capped = n > LAT_CAP;
-        let mut queue = Vec::new();
-        if !capped {
-            for size in 1..=n {
-                for cmb in combinations(n, size) {
-                    queue.push(cmb.iter().map(|&i| active[i].clone()).collect());
-                }
-            }
-        }
-        let mut l = Lattice {
+        Lattice {
             active,
-            capped,
-            queue,
-            qi: 0,
+            capped: false,
+            unknown: false,
+            map: Vec::new(),
             muses: Vec::new(),
-            out: LatOut { capped, ..Default::default() },
-        };
-        if capped {
-            l.out.done = true;
-        } else {
-            l.prepare();
+            mcses: Vec::new(),
+            phase: MPhase::CheckAll,
+            out: LatOut::default(),
         }
-        l
     }
-    fn prepare(&mut self) {
-        while self.qi < self.queue.len() {
-            let c = &self.queue[self.qi];
-            let pruned = self
-                .muses
-                .iter()
-                .any(|m| m.iter().all(|x| c.contains(x)));
-            if pruned {
-                self.qi += 1;
-            } else {
-                return;
-            }
+    fn ids(&self, idxs: &[usize]) -> Vec<String> {
+        idxs.iter().map(|&i| self.active[i].clone()).collect()
+    }
+    /// SMT for "is there still an unexplored region?" — a model of the
+    /// boolean map is a seed subset.
+    fn map_script(&self) -> String {
+        let n = self.active.len();
+        let mut s = String::from("(set-logic ALL)\n");
+        for i in 0..n {
+            s.push_str(&format!("(declare-const m{i} Bool)\n"));
         }
-        self.finalize();
+        for cl in &self.map {
+            let lits = cl
+                .iter()
+                .map(|&l| {
+                    let k = (l.abs() - 1) as usize;
+                    if l > 0 { format!("m{k}") } else { format!("(not m{k})") }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            s.push_str(&format!("(assert (or {lits} false))\n"));
+        }
+        s.push_str("(check-sat)\n(get-value (");
+        s.push_str(&(0..n).map(|i| format!("m{i}")).collect::<Vec<_>>().join(" "));
+        s.push_str("))\n");
+        s
     }
     fn next_script(&self, core: &Core) -> Option<String> {
-        if self.out.done || self.qi >= self.queue.len() {
-            None
-        } else {
-            Some(core.smt_assume(&self.queue[self.qi]))
+        match &self.phase {
+            MPhase::CheckAll => Some(core.smt_assume(&self.active)),
+            MPhase::MapQuery => Some(self.map_script()),
+            MPhase::CheckSeed { seed } => Some(core.smt_assume(&self.ids(seed))),
+            MPhase::Grow { keep, rest, i } => {
+                let mut t = keep.clone();
+                t.push(rest[*i]);
+                Some(core.smt_assume(&self.ids(&t)))
+            }
+            MPhase::Shrink { cand, i } => {
+                let mut t = cand.clone();
+                t.remove(*i);
+                Some(core.smt_assume(&self.ids(&t)))
+            }
+            MPhase::Done => None,
         }
+    }
+    fn budget_hit(&self) -> bool {
+        self.muses.len() + self.mcses.len() >= LAT_BUDGET
     }
     fn feed(&mut self, out: &str) {
-        if self.out.done || self.qi >= self.queue.len() {
-            return;
-        }
         let h = z3_head(out);
-        if h.starts_with("unsat") {
-            let mus = self.queue[self.qi].clone();
-            self.muses.push(mus);
+        let unsat = h.starts_with("unsat");
+        match self.phase.clone() {
+            MPhase::CheckAll => {
+                if unsat {
+                    self.phase = MPhase::MapQuery; // there is ≥1 conflict
+                } else if h.starts_with("sat") {
+                    self.finalize(); // proven consistent
+                } else {
+                    self.unknown = true; // Z3 undecided — do NOT claim consistent
+                    self.finalize();
+                }
+            }
+            MPhase::MapQuery => {
+                if unsat || self.budget_hit() {
+                    self.capped = self.budget_hit() && !(unsat);
+                    self.finalize();
+                } else {
+                    let model = parse_bool_model(out, self.active.len());
+                    let seed: Vec<usize> =
+                        (0..self.active.len()).filter(|&i| model[i]).collect();
+                    self.phase = MPhase::CheckSeed { seed };
+                }
+            }
+            MPhase::CheckSeed { seed } => {
+                if unsat {
+                    // seed is unsatisfiable → shrink it to an MUS
+                    self.phase = if seed.len() <= 1 {
+                        self.record_mus(seed);
+                        MPhase::MapQuery
+                    } else {
+                        MPhase::Shrink { cand: seed, i: 0 }
+                    };
+                } else {
+                    // seed is satisfiable → grow it to an MSS
+                    let rest: Vec<usize> = (0..self.active.len())
+                        .filter(|i| !seed.contains(i))
+                        .collect();
+                    if rest.is_empty() {
+                        self.record_mss(seed);
+                        self.phase = MPhase::MapQuery;
+                    } else {
+                        self.phase = MPhase::Grow { keep: seed, rest, i: 0 };
+                    }
+                }
+            }
+            MPhase::Grow { mut keep, rest, i } => {
+                if !unsat {
+                    keep.push(rest[i]);
+                }
+                let ni = i + 1;
+                if ni < rest.len() {
+                    self.phase = MPhase::Grow { keep, rest, i: ni };
+                } else {
+                    self.record_mss(keep);
+                    self.phase = MPhase::MapQuery;
+                }
+            }
+            MPhase::Shrink { mut cand, i } => {
+                if unsat {
+                    cand.remove(i); // still conflicting without cand[i]
+                    if i >= cand.len() {
+                        self.record_mus(cand);
+                        self.phase = MPhase::MapQuery;
+                    } else {
+                        self.phase = MPhase::Shrink { cand, i };
+                    }
+                } else {
+                    let ni = i + 1; // cand[i] is necessary
+                    if ni >= cand.len() {
+                        self.record_mus(cand);
+                        self.phase = MPhase::MapQuery;
+                    } else {
+                        self.phase = MPhase::Shrink { cand, i: ni };
+                    }
+                }
+            }
+            MPhase::Done => {}
         }
-        // sat / unknown: not a (minimal) conflict at this subset
-        self.qi += 1;
-        self.prepare();
+    }
+    fn record_mus(&mut self, mut mus: Vec<usize>) {
+        mus.sort_unstable();
+        if !self.muses.contains(&mus) {
+            self.muses.push(mus.clone());
+        }
+        // block its up-set: a future seed must drop ≥1 element of this MUS
+        self.map.push(mus.iter().map(|&i| -(i as i32 + 1)).collect());
+    }
+    fn record_mss(&mut self, mss: Vec<usize>) {
+        let mut keep = mss.clone();
+        keep.sort_unstable();
+        let mcs: Vec<usize> = (0..self.active.len())
+            .filter(|i| !keep.contains(i))
+            .collect();
+        if !mcs.is_empty() && !self.mcses.contains(&mcs) {
+            self.mcses.push(mcs.clone());
+        }
+        // block its down-set: a future seed must add ≥1 element outside it
+        let clause: Vec<i32> = (0..self.active.len())
+            .filter(|i| !keep.contains(i))
+            .map(|i| i as i32 + 1)
+            .collect();
+        if clause.is_empty() {
+            // MSS = everything ⇒ the set is consistent; nothing to block,
+            // force the map closed.
+            self.map.push(vec![]);
+        } else {
+            self.map.push(clause);
+        }
     }
     fn finalize(&mut self) {
-        if self.muses.is_empty() {
+        let to_ids = |v: &Vec<usize>, act: &[String]| -> Vec<String> {
+            v.iter().map(|&i| act[i].clone()).collect()
+        };
+        if self.unknown {
+            self.out.consistent = false; // undecided is NOT consistent
+            self.out.mus = Vec::new();
+            self.out.mcs = Vec::new();
+            self.out.mss = Vec::new();
+        } else if self.muses.is_empty() {
             self.out.consistent = true;
             self.out.mus = Vec::new();
             self.out.mcs = Vec::new();
@@ -1280,23 +1433,23 @@ impl Lattice {
             self.out.af = argumentation(&[], &self.out.mss, &self.active);
         } else {
             self.out.consistent = false;
-            self.out.mus = self.muses.clone();
-            self.out.mcs = minimal_hitting_sets(&self.muses, &self.active);
+            self.out.mus = self.muses.iter().map(|m| to_ids(m, &self.active)).collect();
+            self.out.mcs = self.mcses.iter().map(|m| to_ids(m, &self.active)).collect();
             self.out.mss = self
-                .out
-                .mcs
+                .mcses
                 .iter()
                 .map(|m| {
-                    self.active
-                        .iter()
-                        .filter(|x| !m.contains(x))
-                        .cloned()
+                    (0..self.active.len())
+                        .filter(|i| !m.contains(i))
+                        .map(|i| self.active[i].clone())
                         .collect()
                 })
                 .collect();
-            self.out.af = argumentation(&self.muses, &self.out.mss, &self.active);
+            self.out.af = argumentation(&self.out.mus, &self.out.mss, &self.active);
         }
+        self.out.capped = self.capped;
         self.out.done = true;
+        self.phase = MPhase::Done;
     }
     fn result(&self) -> serde_json::Value {
         serde_json::to_value(&self.out).unwrap_or_else(|_| serde_json::json!({}))
@@ -2177,6 +2330,90 @@ mod tests {
         assert!(p.contains("for every") && p.contains("\"op\""), "render + IR present");
         assert!(p.contains("INTRINSIC") && p.contains("FORMALIZATION"));
         assert!(p.contains("\"verdict\"") && p.contains("\"fix\""));
+    }
+
+    #[test]
+    fn marco_scales_past_the_old_cap() {
+        // 12 active claims — the OLD enumerator capped at 10 and produced
+        // nothing. One genuine 3-claim conflict {P, P⇒Q, ¬Q} plus 9
+        // independent consistent claims. MARCO must enumerate it exactly
+        // and NOT report capped.
+        let mut c = Core::default();
+        let mut preds = String::from(r#"{"name":"P","args":[]},{"name":"Q","args":[]}"#);
+        for i in 1..=9 {
+            preds.push_str(&format!(r#",{{"name":"R{i}","args":[]}}"#));
+        }
+        let mut claims = String::from(
+            r#"{"id":"c_a","formula":{"op":"pred","name":"P","args":[]}},
+               {"id":"c_b","formula":{"op":"imp","a":{"op":"pred","name":"P","args":[]},"b":{"op":"pred","name":"Q","args":[]}}},
+               {"id":"c_c","formula":{"op":"not","x":{"op":"pred","name":"Q","args":[]}}}"#,
+        );
+        for i in 1..=9 {
+            claims.push_str(&format!(
+                r#",{{"id":"c_r{i}","formula":{{"op":"pred","name":"R{i}","args":[]}}}}"#
+            ));
+        }
+        assert!(c.ingest(&format!(r#"{{"preds":[{preds}],"claims":[{claims}]}}"#)).0);
+        assert_eq!(c.active().len(), 12);
+        let r = lattice(&c);
+        if r.get("skip").is_some() {
+            return;
+        }
+        assert_eq!(r["consistent"], false);
+        assert_eq!(r["capped"], false, "MARCO must not cap at 12 claims");
+        let mut mus = as_sets(&r["mus"]);
+        mus.sort();
+        assert_eq!(mus, vec![vec!["c_a".to_string(), "c_b".into(), "c_c".into()]]);
+        let mcs = as_sets(&r["mcs"]);
+        assert_eq!(mcs.len(), 3, "3 ways out (drop any of the 3): {mcs:?}");
+        assert!(mcs.iter().all(|m| m.len() == 1));
+        let mss = as_sets(&r["mss"]);
+        assert_eq!(mss.len(), 3);
+        assert!(mss.iter().all(|p| p.len() == 11), "each position keeps 11/12");
+    }
+
+    #[test]
+    fn marco_mcs_is_reiter_dual_of_mus() {
+        // Independent oracle: MARCO's MCS collection must equal the
+        // minimal hitting sets of MARCO's MUS collection (Reiter /
+        // Liffiton–Sakallah duality), on both the single- and
+        // two-conflict cases.
+        for setup in [0u8, 1u8] {
+            let mut c = Core::default();
+            if setup == 0 {
+                c.seed_demo();
+                c.ingest(
+                    r#"{"claims":[{"id":"c_pen_nofly",
+                      "formula":{"op":"forall","vars":[{"name":"x","sort":"Thing"}],
+                        "body":{"op":"imp",
+                          "a":{"op":"pred","name":"Penguin","args":[{"t":"var","name":"x"}]},
+                          "b":{"op":"not","x":{"op":"pred","name":"Flies","args":[{"t":"var","name":"x"}]}}}}}]}"#,
+                );
+            } else {
+                c.ingest(
+                    r#"{"preds":[{"name":"P","args":[]},{"name":"Q","args":[]}],
+                      "claims":[
+                       {"id":"c_p","formula":{"op":"pred","name":"P","args":[]}},
+                       {"id":"c_np","formula":{"op":"not","x":{"op":"pred","name":"P","args":[]}}},
+                       {"id":"c_q","formula":{"op":"pred","name":"Q","args":[]}},
+                       {"id":"c_nq","formula":{"op":"not","x":{"op":"pred","name":"Q","args":[]}}}]}"#,
+                );
+            }
+            let r = lattice(&c);
+            if r.get("skip").is_some() {
+                return;
+            }
+            let mus: Vec<Vec<String>> = as_sets(&r["mus"]);
+            let active: Vec<String> = c.active_ids();
+            let mut expect = minimal_hitting_sets(&mus, &active);
+            for s in expect.iter_mut() {
+                s.sort();
+            }
+            expect.sort();
+            let mut got = as_sets(&r["mcs"]);
+            got.sort();
+            assert_eq!(got, expect, "MCS must be the minimal hitting sets of MUS (setup {setup})");
+        }
     }
 
     #[test]
