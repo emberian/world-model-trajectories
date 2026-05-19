@@ -211,3 +211,34 @@ footer{padding:var(--s6) 0 var(--s7);color:var(--fg3);font-size:.86rem;border-to
   border-top-color:var(--moss);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px}
 @keyframes sp{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+
+/* ── pass 2: polish (MARCO-scale rendering + rhythm) ───────────────── */
+/* positions scale: many small cards, auto-fit, not a rigid 2-col */
+.positions{grid-template-columns:repeat(auto-fill,minmax(248px,1fr))}
+.pos{transition:border-color .15s,transform .15s}
+.pos:hover{transform:translateY(-1px)}
+.pos h4{align-items:baseline}
+.pos .gives code{word-break:break-word}
+/* conflict cards read as a tighter list at scale */
+.mus{display:flex;gap:var(--s2);align-items:baseline;line-height:1.5}
+.mus b{white-space:nowrap;color:#7a2f28}
+/* section labels: clearer vertical rhythm between instrument sections */
+.fieldlabel{margin:var(--s6) 0 var(--s3);padding-bottom:6px;
+  border-bottom:1px solid var(--line)}
+#field>.fieldlabel:first-child{margin-top:var(--s4)}
+/* hero: the two seed buttons read as primary + secondary, not equal */
+.hero .cta .btn.ghost#seed{opacity:.8;font-weight:500}
+.hero .cta .btn.ghost#seed:hover{opacity:1}
+/* claim cards: a touch more air, steadier dialectical stripe */
+.claim{transition:border-color .15s,background .15s}
+.claim .src{font-weight:600}
+.claim.necessary{border-left-color:var(--moss)}
+.claim.contested{border-left-color:var(--lantern)}
+.claim.defeated{border-left-color:var(--mushroom)}
+.claim.coherent{border-left-color:color-mix(in oklab,var(--moss) 50%,var(--line2))}
+/* statusbar: bigger verdict, calmer subtext */
+.statusbar .big{font-size:1.15rem;font-weight:700;letter-spacing:-.01em}
+.statusbar span:not(.big){color:color-mix(in oklab,currentColor 78%,transparent)}
+/* the worked-KB hint: make the optimal-repair / lens cards feel actionable */
+.pos.suggested h4{gap:6px}
+.field-note,#field p.small.muted{margin-top:var(--s3)}

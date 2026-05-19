@@ -92,9 +92,21 @@ honest UX of the seam.
   hangs on quantifiers; the shipped design is assumption-core +
   Rust-side exact repair, which composes with quantifiers. That finding
   is in the commit history, not hidden.)
-- **18 tests now** (added since: ground-atom forced consequences; the
+- **Enumeration is the MARCO algorithm** (Liffiton–Previti–Malik–
+  Marques-Silva): a SAT *map* over selector bits, grow SAT seeds to an
+  MSS / shrink UNSAT seeds to an MUS, block, repeat. It enumerates every
+  minimal conflict and maximal coherent position **with no claim-count
+  cap** (the old 10-claim subset-search cap is gone); an honest budget
+  stops pathological cases and is reported as "real but not exhaustive",
+  never silently truncated. Symbols a claim *uses* but doesn't *declare*
+  are auto-declared (elicited IR often omits them); a Z3 error or
+  `unknown` is surfaced as **undecided**, never as a verdict.
+- **27 tests now** (added since: ground-atom forced consequences; the
   full coherence-lattice — every minimal conflict, the maximal coherent
-  positions, and the two-independent-conflicts Reiter duality;
+  positions, and the two-independent-conflicts Reiter duality; MARCO
+  past the old cap, the MUS↔MCS duality cross-check, a worked non-toy
+  knowledge base with three overlapping conflicts, autodeclare
+  well-formedness, defeasible specificity, conflict-triage prompt;
   explanation witnesses are the *minimal* forcing chain and a
   not-entailed case; the back-translation field round-trips; a forked
   branch round-trips and analyses identically (`state_round_trips`);

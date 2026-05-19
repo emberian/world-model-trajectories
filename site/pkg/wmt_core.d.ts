@@ -8,6 +8,7 @@ export class WmtEngine {
     analyze_feed(z3_out: string): void;
     analyze_next(): string;
     analyze_result(): string;
+    belief_elicitation_prompt(domain: string, n: number): string;
     defeasible_begin(): void;
     defeasible_feed(z3_out: string): void;
     defeasible_next(): string;
@@ -24,8 +25,14 @@ export class WmtEngine {
     prompt(nl: string): string;
     reactivate(id: string): string;
     remove(id: string): string;
+    /**
+     * Start from nothing — loading a demo should give you that demo, not
+     * append it to whatever was there.
+     */
+    reset(): string;
     retract(id: string): string;
     seed_demo(): string;
+    seed_scenario(): string;
     set_defeasible(id: string, d: boolean): string;
     set_weight(id: string, w: bigint): string;
     smt_check(): string;
@@ -47,6 +54,7 @@ export interface InitOutput {
     readonly wmtengine_analyze_feed: (a: number, b: number, c: number) => void;
     readonly wmtengine_analyze_next: (a: number) => [number, number];
     readonly wmtengine_analyze_result: (a: number) => [number, number];
+    readonly wmtengine_belief_elicitation_prompt: (a: number, b: number, c: number, d: number) => [number, number];
     readonly wmtengine_defeasible_begin: (a: number) => void;
     readonly wmtengine_defeasible_feed: (a: number, b: number, c: number) => void;
     readonly wmtengine_defeasible_next: (a: number) => [number, number];
@@ -63,8 +71,10 @@ export interface InitOutput {
     readonly wmtengine_prompt: (a: number, b: number, c: number) => [number, number];
     readonly wmtengine_reactivate: (a: number, b: number, c: number) => [number, number];
     readonly wmtengine_remove: (a: number, b: number, c: number) => [number, number];
+    readonly wmtengine_reset: (a: number) => [number, number];
     readonly wmtengine_retract: (a: number, b: number, c: number) => [number, number];
     readonly wmtengine_seed_demo: (a: number) => [number, number];
+    readonly wmtengine_seed_scenario: (a: number) => [number, number];
     readonly wmtengine_set_defeasible: (a: number, b: number, c: number, d: number) => [number, number];
     readonly wmtengine_set_weight: (a: number, b: number, c: number, d: bigint) => [number, number];
     readonly wmtengine_smt_check: (a: number) => [number, number];

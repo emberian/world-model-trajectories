@@ -52,6 +52,25 @@ export class WmtEngine {
             wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
         }
     }
+    /**
+     * @param {string} domain
+     * @param {number} n
+     * @returns {string}
+     */
+    belief_elicitation_prompt(domain, n) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ptr0 = passStringToWasm0(domain, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+            const len0 = WASM_VECTOR_LEN;
+            const ret = wasm.wmtengine_belief_elicitation_prompt(this.__wbg_ptr, ptr0, len0, n);
+            deferred2_0 = ret[0];
+            deferred2_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
     defeasible_begin() {
         wasm.wmtengine_defeasible_begin(this.__wbg_ptr);
     }
@@ -261,6 +280,23 @@ export class WmtEngine {
         }
     }
     /**
+     * Start from nothing — loading a demo should give you that demo, not
+     * append it to whatever was there.
+     * @returns {string}
+     */
+    reset() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wmtengine_reset(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * @param {string} id
      * @returns {string}
      */
@@ -286,6 +322,21 @@ export class WmtEngine {
         let deferred1_1;
         try {
             const ret = wasm.wmtengine_seed_demo(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    seed_scenario() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wmtengine_seed_scenario(this.__wbg_ptr);
             deferred1_0 = ret[0];
             deferred1_1 = ret[1];
             return getStringFromWasm0(ret[0], ret[1]);

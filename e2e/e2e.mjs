@@ -131,6 +131,23 @@ await page.waitForFunction(() => /OpenRouter API key/.test(document.querySelecto
 if (netHit) fail('key-less auto-formalize must not call OpenRouter');
 console.log('· auto-formalize: present; key-less path honest and offline');
 
+// 8. the worked knowledge base (demonstrate depth): resets, loads a
+//    non-toy KB with three overlapping conflicts + several positions.
+await page.click('#scenario');
+await page.waitForFunction(() => /inconsistent/i.test(document.querySelector('#status')?.textContent || ''), null, { timeout: 90000 }).catch(() => fail('worked KB did not reach inconsistent'));
+await page.waitForFunction(() => /Argumentation/.test(document.querySelector('#field')?.textContent || ''), null, { timeout: 90000 }).catch(() => fail('worked KB lattice did not render'));
+{
+  const claimN = await page.$$eval('#claims .claim', (e) => e.length);
+  if (claimN !== 9) fail('worked KB should reset to its 9 claims, got ' + claimN);
+  const f = await page.$eval('#field', (e) => e.textContent);
+  const conflicts = (f.match(/conflict \d+:/g) || []).length;
+  if (conflicts < 3) fail('worked KB must show ≥3 irreducible disagreements, got ' + conflicts);
+  const positions = (f.match(/Position [A-Z]/g) || []).length;
+  if (positions < 3) fail('worked KB must show ≥3 coherent positions, got ' + positions);
+  if (!/skeptical/.test(f)) fail('worked KB argumentation summary missing');
+}
+console.log('· worked KB: reset + 9 claims + ≥3 conflicts + ≥3 positions + argumentation');
+
 if (errs.length) fail('console/page errors:\n' + errs.join('\n'));
 console.log('PASS — full real-browser stack verified (wasm core + Z3-wasm + DOM + lattice + seam)');
 await browser.close();

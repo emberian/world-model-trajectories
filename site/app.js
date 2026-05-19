@@ -373,7 +373,10 @@ async function doRefresh() {
   if (lat.consistent || drv.status === 'consistent') {
     statusOf = () => 'coherent';
   } else if (lat.capped || !lat.mss || !lat.mss.length) {
-    const inMus = new Set(drv.mus || []);
+    // budget reached: the conflicts found are real, but the position
+    // set is partial — only claim contested/coherent, never necessary
+    // or defeated (those need the full lattice). Honest under-claim.
+    const inMus = new Set((lat.mus || []).flat());
     statusOf = (id) => (inMus.has(id) ? 'contested' : 'coherent');
   } else {
     const P = lat.mss;
@@ -384,9 +387,9 @@ async function doRefresh() {
   }
   renderClaims(statusOf);
 
-  if (drv.status === 'unknown') {
+  if (drv.status === 'unknown' || lat.unknown) {
     status.className = 'statusbar warn';
-    status.innerHTML = '<span class="big">unknown</span><span>Z3 is undecided on this fragment — <b>not</b> assumed consistent. Try a less heavily-quantified formalization.</span>';
+    status.innerHTML = '<span class="big">undecided</span><span>Z3 returned <code>unknown</code> (or the IR was ill-formed) — this is <b>not</b> a verdict, and <b>not</b> assumed consistent. Surfaced, never masked.</span>';
     LAST.summary = { status: 'unknown', kept: active.length, conflicts: 0, positions: 0, skeptical: [], contested: [], defeated: [] };
     renderTree();
     return;
@@ -440,11 +443,9 @@ async function doRefresh() {
 
   // inconsistent
   status.className = 'statusbar bad';
-  status.innerHTML = `<span class="big">inconsistent</span><span>${lat.capped
-    ? 'large set — showing the single minimal conflict + optimal repair (full lattice capped at 10 active claims)'
-    : `${lat.mus.length} irreducible disagreement${lat.mus.length > 1 ? 's' : ''}, ${lat.mss.length} coherent position${lat.mss.length > 1 ? 's' : ''}`}</span>`;
+  status.innerHTML = `<span class="big">inconsistent</span><span>${lat.mus.length} irreducible disagreement${lat.mus.length > 1 ? 's' : ''}, ${lat.mss.length} coherent position${lat.mss.length > 1 ? 's' : ''}${lat.capped ? ' <b>so far</b> — enumeration budget reached; these are real but not exhaustive' : ''}</span>`;
 
-  const muses = lat.capped ? [drv.mus || []] : lat.mus;
+  const muses = (lat.mus && lat.mus.length) ? lat.mus : [drv.mus || []];
   let html = svgField(active, muses);
 
   // Offer the defeasible lens: many "contradictions" in a world-model
@@ -470,22 +471,27 @@ async function doRefresh() {
     `<div class="keeps small">the cheapest way back to coherence by your entrenchment weights — a suggestion, not a verdict. The selection is yours.</div>` +
     `<div class="row"><button class="btn warm sm" id="applyrep">adopt this repair</button></div></div>`;
 
-  if (!lat.capped) {
-    html += `<div class="fieldlabel">Positions · maximal sets that cohere</div><div class="positions">`;
-    lat.mss.forEach((p, i) => {
-      const gives = active.filter((id) => !p.includes(id));
-      const isSug = drop.length && gives.length === drop.length && drop.every((d) => gives.includes(d));
-      html += `<div class="pos${isSug ? ' suggested' : ''}"><h4>${isSug ? '<span class="star">★</span>' : ''}Position ${String.fromCharCode(65 + i)} <span class="muted small">keeps ${p.length}/${active.length}</span></h4>` +
-        `<div class="gives">concedes: ${gives.map((g) => `<code class="tok">${esc(short(g))}</code>`).join(' · ') || '—'}</div>` +
-        `<div class="row"><button class="btn ghost sm" data-pos='${esc(JSON.stringify(gives))}'>adopt — retract the conceded</button></div></div>`;
-    });
-    html += `</div>`;
-    html += `<div class="fieldlabel">Irreducible disagreements</div>`;
-    lat.mus.forEach((m, k) => {
-      html += `<div class="mus"><b>conflict ${k + 1}:</b> these cannot all hold — ${m.map((x) => `<code class="tok">${esc(short(x))}</code>`).join(' · ')}</div>`;
-    });
-  } else {
-    html += `<div class="mus"><b>minimal conflict:</b> ${(drv.mus || []).map((x) => `<code class="tok">${esc(short(x))}</code>`).join(' · ')}</div>`;
+  // Positions & conflicts: MARCO gives the real sets even when the
+  // budget caps enumeration — render them, display-cap long lists with
+  // an honest "+N more" (the computation is complete to the budget; only
+  // the on-screen list is trimmed).
+  const POS_SHOW = 12;
+  const positions = lat.mss || [];
+  html += `<div class="fieldlabel">Positions · maximal sets that cohere${positions.length > POS_SHOW ? ` <span class="muted">(${POS_SHOW} of ${positions.length})</span>` : ''}</div><div class="positions">`;
+  positions.slice(0, POS_SHOW).forEach((p, i) => {
+    const gives = active.filter((id) => !p.includes(id));
+    const isSug = drop.length && gives.length === drop.length && drop.every((d) => gives.includes(d));
+    html += `<div class="pos${isSug ? ' suggested' : ''}"><h4>${isSug ? '<span class="star">★</span>' : ''}Position ${String.fromCharCode(65 + (i % 26))} <span class="muted small">keeps ${p.length}/${active.length}</span></h4>` +
+      `<div class="gives">concedes: ${gives.map((g) => `<code class="tok">${esc(short(g))}</code>`).join(' · ') || '—'}</div>` +
+      `<div class="row"><button class="btn ghost sm" data-pos='${esc(JSON.stringify(gives))}'>adopt — retract the conceded</button></div></div>`;
+  });
+  html += `</div>`;
+  html += `<div class="fieldlabel">Irreducible disagreements${(lat.mus || []).length > POS_SHOW ? ` <span class="muted">(${POS_SHOW} of ${lat.mus.length})</span>` : ''}</div>`;
+  (lat.mus || []).slice(0, POS_SHOW).forEach((m, k) => {
+    html += `<div class="mus"><b>conflict ${k + 1}:</b> these cannot all hold — ${m.map((x) => `<code class="tok">${esc(short(x))}</code>`).join(' · ')}</div>`;
+  });
+  if (lat.capped) {
+    html += `<p class="small muted">Enumeration stopped at the honest budget — the conflicts and positions above are real and solver-verified, but there may be more. Never silently truncated.</p>`;
   }
 
   const af = lat.af || { attacks: [], skeptical: [], credulous: [], defeated: [] };
@@ -494,8 +500,8 @@ async function doRefresh() {
   LAST.summary = {
     status: 'inconsistent',
     kept: active.length,
-    conflicts: lat.capped ? 1 : lat.mus.length,
-    positions: lat.capped ? 0 : lat.mss.length,
+    conflicts: (lat.mus || []).length,
+    positions: (lat.mss || []).length,
     skeptical: af.skeptical.slice(),
     contested,
     defeated: af.defeated.slice(),
@@ -642,7 +648,8 @@ async function triageConflict(musIds) {
 }
 
 function wire() {
-  $('#seed').onclick = () => { engine.seed_demo(); refresh(); };
+  $('#seed').onclick = () => { engine.reset(); engine.seed_demo(); refresh(); };
+  $('#scenario') && ($('#scenario').onclick = () => { engine.reset(); engine.seed_scenario(); refresh(); });
   { const s = loadOR(); if (s.k) $('#orkey').value = s.k; if (s.m) $('#ormodel').value = s.m; }
   $('#autoform').onclick = autoFormalize;
   $('#mkprompt').onclick = () => { $('#prompt').value = engine.prompt($('#nl').value || ''); };

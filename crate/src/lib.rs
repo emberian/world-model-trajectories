@@ -440,7 +440,80 @@ impl Core {
                 self.claims.push(c);
             }
         }
+        self.autodeclare();
         (true, Vec::new())
+    }
+
+    /// Best-effort: declare any predicate / function / constant symbol a
+    /// claim *uses* but did not *declare*. Elicited or hand-written IR
+    /// often omits the `preds`/`funcs` blocks; without this the compiled
+    /// SMT references undeclared symbols and Z3 errors out (which we then
+    /// honestly report as undecided — never as a verdict). Inference is
+    /// deliberately shallow (one default sort, arity from use); Z3's own
+    /// type-checker still catches genuine misuse (same name, two arities).
+    fn autodeclare(&mut self) {
+        fn walk_term(t: &Term, f: &mut BTreeMap<String, usize>) {
+            match t {
+                Term::App { name, args } => {
+                    f.entry(name.clone()).or_insert(args.len());
+                    for a in args { walk_term(a, f); }
+                }
+                Term::Arith { args, .. } => for a in args { walk_term(a, f); },
+                _ => {}
+            }
+        }
+        fn walk(form: &Formula, p: &mut BTreeMap<String, usize>, f: &mut BTreeMap<String, usize>) {
+            match form {
+                Formula::Pred { name, args } => {
+                    p.entry(name.clone()).or_insert(args.len());
+                    for a in args { walk_term(a, f); }
+                }
+                Formula::Eq { a, b } => { walk_term(a, f); walk_term(b, f); }
+                Formula::Cmp { a, b, .. } => { walk_term(a, f); walk_term(b, f); }
+                Formula::Not { x } => walk(x, p, f),
+                Formula::And { xs } | Formula::Or { xs } => for y in xs { walk(y, p, f); },
+                Formula::Imp { a, b } | Formula::Iff { a, b } => { walk(a, p, f); walk(b, p, f); }
+                Formula::Forall { body, .. } | Formula::Exists { body, .. } => walk(body, p, f),
+            }
+        }
+        let mut preds: BTreeMap<String, usize> = BTreeMap::new();
+        let mut funcs: BTreeMap<String, usize> = BTreeMap::new();
+        for c in &self.claims {
+            walk(&c.formula, &mut preds, &mut funcs);
+        }
+        let dflt = self
+            .sorts
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "U".to_string());
+        let need_default = preds.iter().any(|(n, _)| !self.preds.contains_key(n))
+            || funcs.iter().any(|(n, _)| !self.funcs.contains_key(n));
+        if need_default && !self.sorts.contains(&dflt) {
+            self.sorts.push(dflt.clone());
+        }
+        for (name, ar) in preds {
+            if !self.preds.contains_key(&name) {
+                self.decl_order.push(('p', name.clone()));
+                self.preds.insert(
+                    name.clone(),
+                    Sig { name, args: vec![dflt.clone(); ar], ret: None, gloss: "(inferred from use)".into() },
+                );
+            }
+        }
+        for (name, ar) in funcs {
+            if !self.funcs.contains_key(&name) {
+                self.decl_order.push(('f', name.clone()));
+                self.funcs.insert(
+                    name.clone(),
+                    Sig {
+                        name,
+                        args: vec![dflt.clone(); ar],
+                        ret: Some(dflt.clone()),
+                        gloss: "(inferred from use)".into(),
+                    },
+                );
+            }
+        }
     }
 
     fn registry_view(&self) -> String {
@@ -517,6 +590,57 @@ CLAIM(S) TO FORMALIZE:\n\
         )
     }
 
+    /// Belief-elicitation prompt: ask the model to state its OWN beliefs
+    /// about a domain as the IR, so the instrument can check *them* for
+    /// internal consistency. The honest framing is load-bearing and is
+    /// in the prompt itself: we test the mutual consistency of *these
+    /// elicited statements*, never the model's "true" beliefs and never
+    /// their truth. Deterministic, so it is unit-tested offline; the
+    /// live call is the external seam (an ignored, key-gated test).
+    fn belief_elicitation_prompt(&self, domain: &str, n: usize) -> String {
+        format!(
+"You are stating beliefs you hold, to be checked for INTERNAL CONSISTENCY\n\
+by a theorem prover. This is not a test of truth and not a trick: list\n\
+{n} separate, confident, atomic beliefs you hold about the domain below,\n\
+each formalized in a typed many-sorted first-order IR. Return ONLY this\n\
+JSON object:\n\
+\n\
+{{\"sorts\":[\"Thing\"],\n\
+  \"preds\":[{{\"name\":\"Bird\",\"args\":[\"Thing\"],\"gloss\":\"x is a bird\"}}],\n\
+  \"funcs\":[{{\"name\":\"age\",\"args\":[\"Thing\"],\"ret\":\"Int\",\"gloss\":\"age of x\"}}],\n\
+  \"claims\":[{{\"id\":\"c_slug\",\"source\":\"<the belief, your own words>\",\n\
+    \"gloss\":\"<=6 words\",\"back\":\"<one sentence: exactly what the\n\
+            formula says>\",\"formula\":{{...}}}}]}}\n\
+\n\
+FORMULA grammar (JSON, field \"op\"): pred{{name,args}} eq{{a,b}}\n\
+  cmp{{rel:'<'|'<='|'>'|'>=',a,b}} not{{x}} and{{xs}} or{{xs}} imp{{a,b}}\n\
+  iff{{a,b}} forall{{vars:[{{name,sort}}],body}} exists{{vars,body}}\n\
+TERM grammar (field \"t\"): var{{name}} int{{v}} real{{v}}\n\
+  app{{name,args}} (0-arg app = a constant) arith{{op:'+'|'-'|'*',args}}\n\
+\n\
+Rules, most important first:\n\
+1. REUSE one symbol per concept. If two beliefs are about the same\n\
+   predicate/constant they MUST use the same name — minting a synonym is\n\
+   exactly how a real inner contradiction hides. Reuse the vocabulary\n\
+   below when it fits; add new symbols (with a gloss) only when needed.\n\
+2. State beliefs you would actually defend, including ones that feel\n\
+   OBVIOUS — latent contradictions live among the obvious ones (general\n\
+   rules vs. specific cases, transitive relations, category membership).\n\
+3. Prefer typed quantified formulas for general rules:\n\
+   \"penguins don't fly\" => forall x:Thing.(=> (Penguin x) (not (Flies x))).\n\
+4. Do not self-censor for consistency — state them independently. The\n\
+   prover, not you, decides whether they cohere. We test ONLY whether\n\
+   THESE STATEMENTS are mutually consistent: not their truth, not your\n\
+   \"real\" beliefs. Be candid; that is the point.\n\
+5. No SMT-LIB, no prose, no code fences. JSON only.\n\
+\n\
+DOMAIN:\n{domain}\n\
+\n\
+VOCABULARY ALREADY IN PLAY (reuse it):\n{}\n",
+            self.registry_view()
+        )
+    }
+
     /// Triage prompt for a minimal conflict: ask the model whether the
     /// contradiction is INTRINSIC to the sentences or an artifact the
     /// FORMALIZATION introduced, and if the latter, a corrected IR
@@ -579,6 +703,44 @@ No prose, no code fences. JSON only.\n",
            {"id":"c_tweety_penguin","source":"Tweety is a penguin.","gloss":"Tweety is a penguin","weight":4,
             "formula":{"op":"pred","name":"Penguin","args":[{"t":"app","name":"tweety","args":[]}]}}]}"#;
         let _ = self.ingest(demo);
+    }
+
+    /// A worked, non-toy world-model: a small project-status belief set
+    /// with THREE overlapping irreducible disagreements (two claims carry
+    /// blame across more than one), plus two independent facts that hold
+    /// in every coherent position. It exists to show, at a glance, that
+    /// this is a lattice instrument — multiple conflicts, many positions,
+    /// a real argumentation graph — not a 3-claim toy. Deterministic and
+    /// solver-verified by a native test.
+    fn seed_scenario(&mut self) {
+        let s = r#"{
+          "preds":[
+            {"name":"Ships","args":[],"gloss":"the project ships this week"},
+            {"name":"TestsPass","args":[],"gloss":"the test suite passes"},
+            {"name":"Reviewed","args":[],"gloss":"the code was reviewed"},
+            {"name":"QualityHigh","args":[],"gloss":"quality is high"},
+            {"name":"BudgetOK","args":[],"gloss":"the budget is fine"},
+            {"name":"TeamHappy","args":[],"gloss":"the team is happy"}],
+          "claims":[
+           {"id":"c_ships","source":"The project ships this week.","gloss":"it ships","weight":3,
+            "formula":{"op":"pred","name":"Ships","args":[]}},
+           {"id":"c_ship_needs_tests","source":"If it ships, the tests pass.","gloss":"ship ⇒ tests","weight":4,
+            "formula":{"op":"imp","a":{"op":"pred","name":"Ships","args":[]},"b":{"op":"pred","name":"TestsPass","args":[]}}},
+           {"id":"c_tests_fail","source":"The tests do not pass.","gloss":"tests fail","weight":2,
+            "formula":{"op":"not","x":{"op":"pred","name":"TestsPass","args":[]}}},
+           {"id":"c_ship_needs_review","source":"If it ships, the code was reviewed.","gloss":"ship ⇒ review","weight":4,
+            "formula":{"op":"imp","a":{"op":"pred","name":"Ships","args":[]},"b":{"op":"pred","name":"Reviewed","args":[]}}},
+           {"id":"c_not_reviewed","source":"The code was not reviewed.","gloss":"not reviewed","weight":2,
+            "formula":{"op":"not","x":{"op":"pred","name":"Reviewed","args":[]}}},
+           {"id":"c_quality","source":"Quality is high.","gloss":"high quality","weight":3,
+            "formula":{"op":"pred","name":"QualityHigh","args":[]}},
+           {"id":"c_quality_needs_review","source":"High quality requires code review.","gloss":"quality ⇒ review","weight":5,
+            "formula":{"op":"imp","a":{"op":"pred","name":"QualityHigh","args":[]},"b":{"op":"pred","name":"Reviewed","args":[]}}},
+           {"id":"c_budget","source":"The budget is fine.","gloss":"budget ok","weight":3,
+            "formula":{"op":"pred","name":"BudgetOK","args":[]}},
+           {"id":"c_team","source":"The team is happy.","gloss":"team happy","weight":3,
+            "formula":{"op":"pred","name":"TeamHappy","args":[]}}]}"#;
+        let _ = self.ingest(s);
     }
 
     /// Candidate ground atoms to probe for "you never asserted this but
@@ -953,6 +1115,17 @@ impl WmtEngine {
     }
     pub fn meta(&self) -> String { self.core.meta().to_string() }
     pub fn seed_demo(&mut self) -> String { self.core.seed_demo(); self.core.meta().to_string() }
+    pub fn seed_scenario(&mut self) -> String { self.core.seed_scenario(); self.core.meta().to_string() }
+    /// Start from nothing — loading a demo should give you that demo, not
+    /// append it to whatever was there.
+    pub fn reset(&mut self) -> String {
+        self.core = Core::default();
+        self.drv = None;
+        self.lat = None;
+        self.wit = None;
+        self.dfz = None;
+        self.core.meta().to_string()
+    }
     pub fn smt_check(&self) -> String { self.core.smt_check() }
     pub fn smt_core(&self) -> String { self.core.smt_core() }
     pub fn smt_entails_json(&self, formula_json: &str) -> String {
@@ -962,6 +1135,9 @@ impl WmtEngine {
         }
     }
     pub fn prompt(&self, nl: &str) -> String { self.core.prompt(nl) }
+    pub fn belief_elicitation_prompt(&self, domain: &str, n: u32) -> String {
+        self.core.belief_elicitation_prompt(domain, n as usize)
+    }
     pub fn triage_prompt_json(&self, ids_json: &str) -> String {
         match serde_json::from_str::<Vec<String>>(ids_json) {
             Ok(ids) => self.core.triage_prompt(&ids),
@@ -1149,6 +1325,9 @@ fn minimal_hitting_sets(sets: &[Vec<String>], universe: &[String]) -> Vec<Vec<St
 #[derive(Default, Serialize)]
 struct LatOut {
     consistent: bool,
+    /// Z3 errored or returned `unknown` on the whole set — there is NO
+    /// consistency verdict (never read `consistent` when this is true).
+    unknown: bool,
     capped: bool,
     mus: Vec<Vec<String>>,
     mcs: Vec<Vec<String>>,
@@ -1421,7 +1600,8 @@ impl Lattice {
             v.iter().map(|&i| act[i].clone()).collect()
         };
         if self.unknown {
-            self.out.consistent = false; // undecided is NOT consistent
+            self.out.consistent = false; // undecided is NOT a verdict
+            self.out.unknown = true;
             self.out.mus = Vec::new();
             self.out.mcs = Vec::new();
             self.out.mss = Vec::new();
@@ -2373,6 +2553,86 @@ mod tests {
     }
 
     #[test]
+    fn autodeclare_underdeclared_ir_is_well_formed_not_unknown() {
+        // IR that declares the predicate but uses 0-ary constants it
+        // never declares (exactly what an elicited model produced).
+        // Before autodeclare this compiled to undeclared-symbol SMT, Z3
+        // errored, and we mislabeled it. Now it must be well-formed:
+        // a real verdict, never `unknown`.
+        let mut c = Core::default();
+        assert!(c.ingest(
+            r#"{"sorts":["Thing"],
+              "preds":[{"name":"Bigger","args":["Thing","Thing"],"gloss":"x>y"}],
+              "claims":[
+               {"id":"c_ab","formula":{"op":"pred","name":"Bigger","args":[
+                 {"t":"app","name":"A","args":[]},{"t":"app","name":"B","args":[]}]}},
+               {"id":"c_bc","formula":{"op":"pred","name":"Bigger","args":[
+                 {"t":"app","name":"B","args":[]},{"t":"app","name":"C","args":[]}]}}]}"#
+        ).0);
+        let r = lattice(&c);
+        if r.get("skip").is_some() { return; }
+        assert_eq!(r["unknown"], false, "must NOT be undecided: {r}");
+        assert_eq!(r["consistent"], true, "two unrelated facts cohere");
+
+        // Same under-declared style, but a strict cycle with transitivity
+        // and irreflexivity → a genuine MUS Z3 must find.
+        let mut d = Core::default();
+        assert!(d.ingest(
+            r#"{"sorts":["Thing"],
+              "preds":[{"name":"Gt","args":["Thing","Thing"],"gloss":"x>y"}],
+              "claims":[
+               {"id":"c_trans","formula":{"op":"forall",
+                 "vars":[{"name":"x","sort":"Thing"},{"name":"y","sort":"Thing"},{"name":"z","sort":"Thing"}],
+                 "body":{"op":"imp",
+                   "a":{"op":"and","xs":[
+                     {"op":"pred","name":"Gt","args":[{"t":"var","name":"x"},{"t":"var","name":"y"}]},
+                     {"op":"pred","name":"Gt","args":[{"t":"var","name":"y"},{"t":"var","name":"z"}]}]},
+                   "b":{"op":"pred","name":"Gt","args":[{"t":"var","name":"x"},{"t":"var","name":"z"}]}}}},
+               {"id":"c_irr","formula":{"op":"forall","vars":[{"name":"x","sort":"Thing"}],
+                 "body":{"op":"not","x":{"op":"pred","name":"Gt","args":[{"t":"var","name":"x"},{"t":"var","name":"x"}]}}}},
+               {"id":"c_ab","formula":{"op":"pred","name":"Gt","args":[{"t":"app","name":"A","args":[]},{"t":"app","name":"B","args":[]}]}},
+               {"id":"c_bc","formula":{"op":"pred","name":"Gt","args":[{"t":"app","name":"B","args":[]},{"t":"app","name":"C","args":[]}]}},
+               {"id":"c_ca","formula":{"op":"pred","name":"Gt","args":[{"t":"app","name":"C","args":[]},{"t":"app","name":"A","args":[]}]}}]}"#
+        ).0);
+        let r = lattice(&d);
+        if r.get("skip").is_some() { return; }
+        assert_eq!(r["unknown"], false);
+        assert_eq!(r["consistent"], false, "a strict 3-cycle is inconsistent");
+        assert!(!r["mus"].as_array().unwrap().is_empty(), "the cycle is a real MUS");
+    }
+
+    #[test]
+    fn scenario_seed_is_a_rich_lattice() {
+        // The "demonstrate the depth" seed: exactly 3 overlapping
+        // irreducible disagreements, several coherent positions, and the
+        // two independent facts skeptically accepted (in every position).
+        let mut c = Core::default();
+        c.seed_scenario();
+        let r = lattice(&c);
+        if r.get("skip").is_some() { return; }
+        assert_eq!(r["unknown"], false);
+        assert_eq!(r["consistent"], false);
+        assert_eq!(r["capped"], false, "must be exhaustive, not budget-capped");
+        let mut mus = as_sets(&r["mus"]); // as_sets sorts each inner vec
+        mus.sort();
+        let want = |xs: &[&str]| xs.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            mus,
+            vec![
+                want(&["c_not_reviewed", "c_quality", "c_quality_needs_review"]),
+                want(&["c_not_reviewed", "c_ship_needs_review", "c_ships"]),
+                want(&["c_ship_needs_tests", "c_ships", "c_tests_fail"]),
+            ],
+            "exactly the three intended overlapping conflicts"
+        );
+        assert!(r["mss"].as_array().unwrap().len() >= 3, "several coherent positions");
+        let sk = &r["af"]["skeptical"];
+        let sk: Vec<&str> = sk.as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+        assert!(sk.contains(&"c_budget") && sk.contains(&"c_team"),
+            "independent facts must be skeptically accepted: {sk:?}");
+    }
+
+    #[test]
     fn marco_mcs_is_reiter_dual_of_mus() {
         // Independent oracle: MARCO's MCS collection must equal the
         // minimal hitting sets of MARCO's MUS collection (Reiter /
@@ -2414,6 +2674,148 @@ mod tests {
             got.sort();
             assert_eq!(got, expect, "MCS must be the minimal hitting sets of MUS (setup {setup})");
         }
+    }
+
+    #[test]
+    fn belief_elicitation_prompt_is_honest_and_well_formed() {
+        // Deterministic, offline: the elicitation prompt must carry the
+        // IR grammar, the symbol-reuse discipline (or contradictions
+        // hide), the domain + N, and — load-bearing — the honest framing
+        // that we test mutual consistency of THESE statements, not truth.
+        let mut c = Core::default();
+        c.seed_demo(); // vocabulary should be carried in for reuse
+        let p = c.belief_elicitation_prompt("animal flight and taxonomy", 12);
+        assert!(p.contains("animal flight and taxonomy") && p.contains("12 separate"));
+        assert!(p.contains("\"op\"") && p.contains("forall"), "IR grammar present");
+        assert!(p.contains("REUSE one symbol per concept"));
+        assert!(p.contains("not their truth"), "honesty framing present");
+        assert!(p.contains("Bird"), "existing vocabulary carried for reuse");
+        assert!(!p.contains("```"), "must forbid code fences");
+    }
+
+    /// The headline "next level" demo, kept OUT of the default suite:
+    /// elicit a model's own beliefs, then let Z3/MARCO find the minimal
+    /// self-contradictions among *its stated beliefs*. External model +
+    /// network, so it is #[ignore]d and offline-skips. Two backends:
+    ///   WMT_KIMI=1 [WMT_DOMAIN="..."] cargo test --release \
+    ///     -- --ignored --nocapture llm_self_probe       (local `kimi`)
+    ///   WMT_OR_KEY=sk-or-... [WMT_OR_MODEL=...] [WMT_DOMAIN="..."] …
+    ///                                                   (OpenRouter)
+    #[test]
+    #[ignore]
+    fn llm_self_probe() {
+        let domain = std::env::var("WMT_DOMAIN").unwrap_or_else(|_| {
+            "everyday physical & biological commonsense: animals, flight, \
+             size, age, and habitats — include the obvious".into()
+        });
+        let mut c = Core::default();
+        let prompt = c.belief_elicitation_prompt(&domain, 14);
+        let or_key = std::env::var("WMT_OR_KEY").ok().filter(|k| !k.is_empty());
+
+        let (content, model): (String, String) = if std::env::var("WMT_KIMI").is_ok() {
+            // Local emulation of the workflow via the `kimi` CLI agent —
+            // no external API, no rate limits. Prompt piped on stdin.
+            let mut ch = match Command::new("kimi")
+                .args(["--quiet", "--print", "--input-format", "text"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(_) => { eprintln!("SKIP: no `kimi` on PATH"); return; }
+            };
+            ch.stdin.as_mut().unwrap().write_all(prompt.as_bytes()).unwrap();
+            drop(ch.stdin.take());
+            let o = ch.wait_with_output().unwrap();
+            (String::from_utf8_lossy(&o.stdout).to_string(), "kimi (local)".into())
+        } else if let Some(key) = or_key {
+            // Free OpenRouter providers are flaky/rate-limited; bound
+            // each call and fall back across known-good free models.
+            let mut models: Vec<String> = Vec::new();
+            if let Ok(m) = std::env::var("WMT_OR_MODEL") { if !m.is_empty() { models.push(m); } }
+            for m in ["nvidia/nemotron-3-super-120b-a12b:free", "google/gemma-4-31b-it:free"] {
+                if !models.iter().any(|x| x == m) { models.push(m.into()); }
+            }
+            let mut content = String::new();
+            let mut used = String::new();
+            for m in &models {
+                let body = serde_json::json!({
+                    "model": m,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0
+                })
+                .to_string();
+                let out = Command::new("curl")
+                    .args([
+                        "-s", "--max-time", "150",
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        "-H", &format!("Authorization: Bearer {key}"),
+                        "-H", "Content-Type: application/json",
+                        "-d", &body,
+                    ])
+                    .output();
+                let resp = match out {
+                    Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+                    Err(_) => { eprintln!("SKIP: no curl"); return; }
+                };
+                let v: serde_json::Value = serde_json::from_str(&resp).unwrap_or_default();
+                let cc = v["choices"][0]["message"]["content"].as_str().unwrap_or("");
+                if !cc.is_empty() {
+                    content = cc.to_string();
+                    used = m.clone();
+                    break;
+                }
+                eprintln!("  {m}: empty/err ({})", resp.chars().take(160).collect::<String>().replace('\n', " "));
+            }
+            (content, used)
+        } else {
+            eprintln!("SKIP: set WMT_KIMI=1 (local) or WMT_OR_KEY=sk-or-… to run");
+            return;
+        };
+        if content.trim().is_empty() {
+            eprintln!("SKIP: backend returned empty (rate-limited/contended) — rerun");
+            return;
+        }
+        let content = content.as_str();
+        let (a, b) = (content.find('{'), content.rfind('}'));
+        let ir = match (a, b) {
+            (Some(a), Some(b)) if b > a => &content[a..=b],
+            _ => { eprintln!("SKIP: no JSON in reply"); return; }
+        };
+        let _ = std::fs::write("/tmp/wmt_selfprobe_last.json", ir);
+        let (ok, errs) = c.ingest(ir);
+        assert!(ok, "model IR did not ingest: {errs:?}\n---\n{ir}");
+        let n = c.active().len();
+        eprintln!("\n=== {model} stated {n} beliefs about: {domain}");
+        for cl in &c.claims {
+            eprintln!(
+                "  [{}] {}",
+                cl.id,
+                if cl.source.is_empty() { form_en(&cl.formula) } else { cl.source.clone() }
+            );
+        }
+        let r = lattice(&c);
+        if r.get("skip").is_some() { return; }
+        if r["unknown"] == serde_json::json!(true) {
+            eprintln!("=== UNDECIDED — Z3 errored/unknown on this set; NOT a verdict");
+            eprintln!("=== (ill-formed or undecidable IR; honest non-answer, not 'consistent')");
+            return;
+        }
+        eprintln!("=== consistent: {} (capped {})", r["consistent"], r["capped"]);
+        for (k, m) in r["mus"].as_array().unwrap_or(&vec![]).iter().enumerate() {
+            let ids: Vec<&str> = m.as_array().unwrap().iter().filter_map(|x| x.as_str()).collect();
+            eprintln!("--- self-contradiction {}: it cannot consistently hold all of:", k + 1);
+            for id in ids {
+                if let Some(cl) = c.claims.iter().find(|cc| cc.id == id) {
+                    eprintln!("    • {}", if cl.source.is_empty() { form_en(&cl.formula) } else { cl.source.clone() });
+                }
+            }
+        }
+        // The pipeline must have produced a verdict; we do NOT assert the
+        // model is inconsistent (honest — it may cohere on a given run).
+        assert!(r.get("consistent").is_some(), "MARCO produced no verdict");
+        eprintln!("=== (this checks the consistency of THESE elicited statements, not their truth)");
     }
 
     #[test]

@@ -37,7 +37,8 @@
       The trajectory is the object; the conflict is its structure.
     </p>
     <div class="cta">
-      <button class="btn warm" id="seed">Load the penguin trajectory</button>
+      <button class="btn warm" id="scenario">Load a worked knowledge base</button>
+      <button class="btn ghost" id="seed">or the penguin</button>
       <a class="btn ghost" href="#loop">Add a claim</a>
       <a class="btn ghost" href="#how">What this is &amp; isn&rsquo;t</a>
       <a class="btn ghost" href="https://github.com/emberian/world-model-trajectories">Source</a>
@@ -118,8 +119,8 @@
       <strong>The seam is the point — three places this is honest about, none hidden:</strong>
       <ol>
         <li><b>NL&nbsp;→&nbsp;IR faithfulness</b> is you + your LLM, in the open. You confirm the rendered English, never logic. The tool guarantees consistency <em>of the formalization</em>, never that it captures your sentence. That stays yours.</li>
-        <li><b>Z3 can answer <code>unknown</code></b> on hard quantified fragments. It says so — never silently &ldquo;consistent&rdquo;.</li>
-        <li><b>Full enumeration is capped</b> at 10 active claims. Above it the instrument honestly falls back to the single minimal conflict + the optimal repair — it never silently truncates the lattice.</li>
+        <li><b>Z3 can answer <code>unknown</code></b> (or the IR can be ill-formed) on hard fragments. That is surfaced as <em>undecided</em> — never a verdict, never silently &ldquo;consistent&rdquo;.</li>
+        <li><b>Enumeration is exhaustive</b> (the MARCO algorithm — no claim-count cap), bounded only by an honest budget on pathological cases. If the budget is hit it says &ldquo;real but not exhaustive&rdquo; — it never silently truncates the lattice.</li>
       </ol>
       Goal: <em>consistency, not truth.</em> It never claims your claims are right — only which subsets can hold together (the dialectic), which can&rsquo;t (the irreducible disagreements), the least-entrenchment way out, and what you&rsquo;re jointly committed to.
     </div>
@@ -127,18 +128,22 @@
       A truth-maintenance system + AGM belief revision, made legible
       (Doyle / de&nbsp;Kleer / Alchourrón–Gärdenfors–Makinson; minimal
       conflicts &amp; their hitting-set–dual correction sets, Reiter /
-      Liffiton–Sakallah). A Rust core (<code>wmt-core</code>, wasm) owns the
-      typed IR, the IR↔SMT compiler, the English renderer, the trajectory,
-      the lattice/repair drivers, the Dung argumentation reading and the
-      forkable-branch (de)serialization — it does <em>not</em> solve. The
-      solver is Z3&nbsp;4.16 (wasm), here in your tab. The compiler,
-      minimal-conflict enumeration, Reiter duality, the min-entrenchment
-      repair, explanation witnesses, the argumentation framework and the
+      Liffiton–Sakallah; defaults &amp; the specific-over-general via Poole
+      specificity + Brewka preferred subtheory). A Rust core
+      (<code>wmt-core</code>, wasm) owns the typed IR, the IR↔SMT compiler,
+      the English renderer, the trajectory, the full <b>MARCO</b>
+      conflict/position enumerator, the defeasible and Dung-argumentation
+      readings and the forkable-branch (de)serialization — it does
+      <em>not</em> solve. The solver is Z3&nbsp;4.16 (wasm), here in your
+      tab. The compiler, MARCO enumeration (every minimal conflict and
+      maximal coherent position, no claim-count cap), Reiter duality, the
+      min-entrenchment repair, explanation witnesses, the defeasible
+      layer, the argumentation framework, symbol auto-declaration and the
       branch round-trip are verified end-to-end against the native Z3
-      binary — 18 tests, incl. a quantified contradiction, an arithmetic
-      one, the two-independent-conflicts duality, plus a real-browser
-      headless run of the whole stack in CI. First load fetches
-      ~34&nbsp;MB of Z3 wasm, then it is cached.
+      binary — 27 tests, incl. a quantified contradiction, an arithmetic
+      one, MARCO past the old cap, the MUS↔MCS duality cross-check, plus a
+      real-browser headless run of the whole stack in CI. First load
+      fetches ~34&nbsp;MB of Z3 wasm, then it is cached.
     </p>
   </section>
 
