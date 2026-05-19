@@ -92,9 +92,25 @@ honest UX of the seam.
   hangs on quantifiers; the shipped design is assumption-core +
   Rust-side exact repair, which composes with quantifiers. That finding
   is in the commit history, not hidden.)
-- 12 tests now (added: ground-atom forced consequences; the full
-  coherence-lattice — every minimal conflict, the maximal coherent
-  positions, and the two-independent-conflicts Reiter duality).
+- **18 tests now** (added since: ground-atom forced consequences; the
+  full coherence-lattice — every minimal conflict, the maximal coherent
+  positions, and the two-independent-conflicts Reiter duality;
+  explanation witnesses are the *minimal* forcing chain and a
+  not-entailed case; the back-translation field round-trips; a forked
+  branch round-trips and analyses identically (`state_round_trips`);
+  and the Dung argumentation reading — attack = co-membership in a
+  minimal conflict, with skeptical/contested/defeated acceptance — on
+  the single-conflict, two-conflict, and coherent cases).
+- **The argumentation view is not a second solve.** Under attack =
+  co-membership in an irreducible disagreement, a set is conflict-free
+  iff consistent, so the preferred/stable extensions *are* the maximal
+  coherent positions the lattice already enumerates; the attack graph
+  and acceptance labels are a faithful reading of tested lattice data,
+  and the page says so in-product.
+- **The trajectory is a tree, not a line.** `Core` (de)serializes
+  exactly; a branch is a snapshot, fork/switch/compare is real and
+  persisted in-tab. The engine owns the round-trip (tested); the tree
+  lives in the UI.
 - The browser solver is the official `z3-solver` wasm; checked
   **byte-identical** to that binary on the same scripts.
 - **The whole stack is now verified in a real headless browser**
@@ -111,6 +127,13 @@ honest UX of the seam.
   COOP/COEP, fixed with a vendored `coi-serviceworker` shim that works
   on GitHub Pages). Both are in the commit history, not hidden — the
   reason real-browser verification is not optional.
+- The e2e now also asserts the argumentation attack-graph + acceptance
+  summary and a full fork → repair → side-by-side branch-compare, and
+  it **again earned its keep**: it caught a save-the-instant-status-
+  flipped race that snapshotted a stale branch summary. Local Chrome
+  won the race; CI's slower Chromium failed correctly; fixed by
+  capturing the summary synchronously. In the commit history, not
+  hidden.
 
 First load fetches ~34&nbsp;MB of Z3 wasm, then it is cached. Everything
 runs locally in the tab; nothing is sent anywhere.
