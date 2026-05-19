@@ -62,6 +62,17 @@
     </section>
   </div>
 
+  <section class="panel" id="branchpanel">
+    <h2>Trajectory tree</h2>
+    <p class="sub">A world-model is not one state but a tree of them. Save the current one as a branch, fork it, retract or add a claim down one branch, and put two branches&rsquo; coherence side by side &mdash; a debate you can actually walk. Branches persist in this browser; nothing leaves the tab.</p>
+    <div class="cta" style="margin:0 0 var(--s4)">
+      <input id="branchname" placeholder="name this branch (optional)" />
+      <button class="btn sm" id="savebranch">Save this state as a branch</button>
+    </div>
+    <div id="branches"></div>
+    <div id="cmp"></div>
+  </section>
+
   <details class="loop" id="loop">
     <summary>Add a claim — the formalization loop</summary>
     <div class="body">
@@ -103,13 +114,16 @@
       conflicts &amp; their hitting-set–dual correction sets, Reiter /
       Liffiton–Sakallah). A Rust core (<code>wmt-core</code>, wasm) owns the
       typed IR, the IR↔SMT compiler, the English renderer, the trajectory,
-      and the lattice/repair drivers — it does <em>not</em> solve. The solver
-      is Z3&nbsp;4.16 (wasm), here in your tab. Compiler, minimal-conflict
-      enumeration, Reiter duality and the min-entrenchment repair are
-      verified end-to-end against the native Z3 binary — 11 tests,
-      incl. a quantified contradiction, an arithmetic one, and the
-      two-independent-conflicts duality. First load fetches ~34&nbsp;MB of
-      Z3 wasm, then it is cached.
+      the lattice/repair drivers, the Dung argumentation reading and the
+      forkable-branch (de)serialization — it does <em>not</em> solve. The
+      solver is Z3&nbsp;4.16 (wasm), here in your tab. The compiler,
+      minimal-conflict enumeration, Reiter duality, the min-entrenchment
+      repair, explanation witnesses, the argumentation framework and the
+      branch round-trip are verified end-to-end against the native Z3
+      binary — 18 tests, incl. a quantified contradiction, an arithmetic
+      one, the two-independent-conflicts duality, plus a real-browser
+      headless run of the whole stack in CI. First load fetches
+      ~34&nbsp;MB of Z3 wasm, then it is cached.
     </p>
   </section>
 

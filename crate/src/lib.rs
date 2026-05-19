@@ -117,12 +117,17 @@ struct Ingest {
 
 const BUILTIN_SORTS: [&str; 3] = ["Bool", "Int", "Real"];
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct Core {
+    #[serde(default)]
     sorts: Vec<String>, // user sorts (non-builtin)
+    #[serde(default)]
     preds: BTreeMap<String, Sig>,
+    #[serde(default)]
     funcs: BTreeMap<String, Sig>,
+    #[serde(default)]
     decl_order: Vec<(char, String)>, // ('p'|'f', name) for stable emission
+    #[serde(default)]
     claims: Vec<Claim>,
 }
 
@@ -596,6 +601,23 @@ CLAIM(S) TO FORMALIZE:\n\
                 })).collect::<Vec<_>>(),
         })
     }
+
+    /// The entire world-model — vocabulary + trajectory — as portable
+    /// JSON. This is what makes a *forkable trajectory tree* possible:
+    /// a branch is just a saved `Core`. Round-trips exactly (see the
+    /// `state_round_trips` native test).
+    fn export_state(&self) -> String {
+        serde_json::to_string(self).unwrap_or_else(|_| "{}".into())
+    }
+    fn import_state(&mut self, json: &str) -> bool {
+        match serde_json::from_str::<Core>(json) {
+            Ok(c) => {
+                *self = c;
+                true
+            }
+            Err(_) => false,
+        }
+    }
 }
 
 // ---- assumption-literal analysis (robust, optimize-free) -----------------
@@ -890,6 +912,20 @@ impl WmtEngine {
     }
     pub fn prompt(&self, nl: &str) -> String { self.core.prompt(nl) }
 
+    // ---- forkable trajectory tree (C) ------------------------------------
+    // Export the whole world-model so the UI can keep a tree of branches
+    // (fork = snapshot here; switch = import a snapshot; compare = analyze
+    // two snapshots). The engine owns the (de)serialization so a branch is
+    // guaranteed to round-trip; the tree itself lives in the UI.
+    pub fn export_state(&self) -> String { self.core.export_state() }
+    pub fn import_state(&mut self, json: &str) -> String {
+        let ok = self.core.import_state(json);
+        self.drv = None;
+        self.lat = None;
+        self.wit = None;
+        serde_json::json!({"ok": ok, "meta": self.core.meta()}).to_string()
+    }
+
     // ---- analysis step driver (status + minimal conflict + optimal repair)
     pub fn analyze_begin(&mut self) { self.drv = Some(Driver::new(&self.core)); }
     pub fn analyze_next(&self) -> String {
@@ -1034,7 +1070,56 @@ struct LatOut {
     mus: Vec<Vec<String>>,
     mcs: Vec<Vec<String>>,
     mss: Vec<Vec<String>>,
+    /// Dung argumentation view, derived (not re-solved) from the lattice.
+    af: Af,
     done: bool,
+}
+
+/// An abstract argumentation framework read off the coherence lattice.
+///
+/// Arguments = the active claims. Attack = two claims co-occur in some
+/// minimal conflict (an irreducible disagreement). Under exactly this
+/// attack relation a set is conflict-free iff it contains no whole MUS
+/// iff it is *consistent*; the preferred / stable extensions therefore
+/// coincide with the maximal coherent positions (MSSes) the lattice
+/// already enumerates. So the acceptance statuses below are a faithful
+/// Dung reading of data we already have — not a second, unchecked solve:
+///
+///   * skeptical — in *every* extension (= "necessary"): cannot be given
+///     up by any rational resolution of the disagreement;
+///   * credulous-only — in *some* but not every extension (= "contested"):
+///     defensible, but a coherent position can also reject it;
+///   * defeated — in *no* extension: every maximal coherent position
+///     drops it.
+#[derive(Default, Serialize)]
+struct Af {
+    /// Unordered attack edges {a,b}, a<b, deduplicated.
+    attacks: Vec<Vec<String>>,
+    skeptical: Vec<String>,
+    credulous: Vec<String>,
+    defeated: Vec<String>,
+}
+
+/// Pure, separately tested: derive the AF from the MUS collection and the
+/// extensions (MSSes) over the active arguments.
+fn argumentation(muses: &[Vec<String>], mss: &[Vec<String>], active: &[String]) -> Af {
+    use std::collections::BTreeSet;
+    let mut edges: BTreeSet<(String, String)> = BTreeSet::new();
+    for m in muses {
+        for (i, a) in m.iter().enumerate() {
+            for b in &m[i + 1..] {
+                let (x, y) = if a <= b { (a, b) } else { (b, a) };
+                edges.insert((x.clone(), y.clone()));
+            }
+        }
+    }
+    let attacks = edges.into_iter().map(|(a, b)| vec![a, b]).collect();
+    let in_some = |id: &String| mss.iter().any(|e| e.contains(id));
+    let in_all = |id: &String| !mss.is_empty() && mss.iter().all(|e| e.contains(id));
+    let skeptical = active.iter().filter(|id| in_all(id)).cloned().collect();
+    let credulous = active.iter().filter(|id| in_some(id)).cloned().collect();
+    let defeated = active.iter().filter(|id| !in_some(id)).cloned().collect();
+    Af { attacks, skeptical, credulous, defeated }
 }
 
 struct Lattice {
@@ -1115,6 +1200,7 @@ impl Lattice {
             self.out.mus = Vec::new();
             self.out.mcs = Vec::new();
             self.out.mss = vec![self.active.clone()];
+            self.out.af = argumentation(&[], &self.out.mss, &self.active);
         } else {
             self.out.consistent = false;
             self.out.mus = self.muses.clone();
@@ -1131,6 +1217,7 @@ impl Lattice {
                         .collect()
                 })
                 .collect();
+            self.out.af = argumentation(&self.muses, &self.out.mss, &self.active);
         }
         self.out.done = true;
     }
@@ -1573,6 +1660,113 @@ mod tests {
         if let Some(o) = z3(&c.smt_entails(&probe)) {
             assert_eq!(head(&o), "unsat", "Flies(tweety) should be entailed: {o}");
         }
+    }
+
+    #[test]
+    fn state_round_trips() {
+        // A branch in the trajectory tree is a saved Core. Export the
+        // penguin world-model, import it into a fresh engine, and verify
+        // the imported branch analyses *identically* (same conflict).
+        let mut a = Core::default();
+        a.seed_demo();
+        a.ingest(
+            r#"{"claims":[{"id":"c_pen_nofly","weight":3,
+              "formula":{"op":"forall","vars":[{"name":"x","sort":"Thing"}],
+                "body":{"op":"imp",
+                  "a":{"op":"pred","name":"Penguin","args":[{"t":"var","name":"x"}]},
+                  "b":{"op":"not","x":{"op":"pred","name":"Flies","args":[{"t":"var","name":"x"}]}}}}}]}"#,
+        );
+        let snap = a.export_state();
+        let mut b = Core::default();
+        assert!(b.import_state(&snap), "snapshot must import");
+        assert_eq!(a.meta(), b.meta(), "imported branch must match exactly");
+        let ra = lattice(&a);
+        if ra.get("skip").is_some() {
+            return;
+        }
+        let rb = lattice(&b);
+        assert_eq!(ra, rb, "forked branch must analyse identically");
+        assert!(!b.import_state("{ not json"), "garbage must be rejected");
+    }
+
+    #[test]
+    fn argumentation_penguin_framework() {
+        // Single 4-claim irreducible disagreement → in the Dung reading
+        // every pair of the four attacks every other (6 undirected
+        // edges); no claim survives in *all* maximal coherent positions
+        // (each position drops a different one) so none is skeptically
+        // accepted; all four are credulously defensible; none defeated.
+        let mut c = Core::default();
+        c.seed_demo();
+        c.ingest(
+            r#"{"claims":[{"id":"c_pen_nofly","weight":1,
+              "formula":{"op":"forall","vars":[{"name":"x","sort":"Thing"}],
+                "body":{"op":"imp",
+                  "a":{"op":"pred","name":"Penguin","args":[{"t":"var","name":"x"}]},
+                  "b":{"op":"not","x":{"op":"pred","name":"Flies","args":[{"t":"var","name":"x"}]}}}}}]}"#,
+        );
+        let r = lattice(&c);
+        if r.get("skip").is_some() {
+            return;
+        }
+        let af = &r["af"];
+        let atk = as_sets(&af["attacks"]);
+        assert_eq!(atk.len(), 6, "all 4 mutually attack: {atk:?}");
+        assert!(af["skeptical"].as_array().unwrap().is_empty());
+        assert_eq!(af["credulous"].as_array().unwrap().len(), 4);
+        assert!(af["defeated"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn argumentation_two_conflicts_and_consistent() {
+        // Two independent conflicts: attack edges are exactly the two
+        // contradictory pairs (no cross edges). And a coherent world-model
+        // makes every claim skeptically accepted with no attacks.
+        let mut c = Core::default();
+        c.ingest(
+            r#"{"preds":[{"name":"P","args":[],"gloss":"p"},{"name":"Q","args":[],"gloss":"q"}],
+              "claims":[
+               {"id":"c_p","formula":{"op":"pred","name":"P","args":[]}},
+               {"id":"c_np","formula":{"op":"not","x":{"op":"pred","name":"P","args":[]}}},
+               {"id":"c_q","formula":{"op":"pred","name":"Q","args":[]}},
+               {"id":"c_nq","formula":{"op":"not","x":{"op":"pred","name":"Q","args":[]}}}]}"#,
+        );
+        let r = lattice(&c);
+        if r.get("skip").is_some() {
+            return;
+        }
+        let mut atk = as_sets(&r["af"]["attacks"]);
+        atk.sort();
+        assert_eq!(
+            atk,
+            vec![
+                vec!["c_np".to_string(), "c_p".to_string()],
+                vec!["c_nq".to_string(), "c_q".to_string()]
+            ],
+            "attacks must be exactly the two contradictory pairs"
+        );
+
+        let mut k = Core::default();
+        k.seed_demo();
+        let rk = lattice(&k);
+        if rk.get("skip").is_some() {
+            return;
+        }
+        let af = &rk["af"];
+        assert!(af["attacks"].as_array().unwrap().is_empty());
+        let mut sk: Vec<String> = af["skeptical"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        sk.sort();
+        assert_eq!(
+            sk,
+            vec!["c_birds_fly", "c_penguin_bird", "c_tweety_penguin"],
+            "in a coherent world-model every claim is skeptically accepted"
+        );
+        assert!(af["defeated"].as_array().unwrap().is_empty());
     }
 
     #[test]

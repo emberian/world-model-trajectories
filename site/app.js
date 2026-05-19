@@ -136,6 +136,159 @@ function svgField(activeIds, muses) {
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="conflict structure">${hulls}${nodes}${legend}</svg>`;
 }
 
+// Increment B — the Dung argumentation reading, drawn as an attack graph.
+// Nodes = active claims; an undirected edge = the two co-occur in an
+// irreducible disagreement (so a node's neighbours are exactly what it
+// must out-argue). Colour = acceptance: skeptical (in every coherent
+// position), contested (some), defeated (none). This is a *picture of
+// lattice data already computed and tested*, not a second solve.
+function svgAttackGraph(active, af) {
+  const n = active.length;
+  if (!n) return '';
+  const cls = (id) =>
+    af.skeptical.includes(id) ? 'necessary'
+      : af.defeated.includes(id) ? 'defeated'
+      : af.credulous.includes(id) ? 'contested' : 'coherent';
+  const fill = { necessary: '#5b8a5a', contested: '#d99a3f', defeated: '#b9534a', coherent: '#2a3a55' };
+  const W = 640, H = Math.max(240, 80 + n * 22), cx = W / 2, cy = H / 2, R = Math.min(cy - 36, 150);
+  const pt = (i) => {
+    const a = -Math.PI / 2 + (2 * Math.PI * i) / n;
+    return [cx + R * Math.cos(a), cy + R * Math.sin(a)];
+  };
+  let edges = '';
+  (af.attacks || []).forEach(([a, b]) => {
+    const i = active.indexOf(a), j = active.indexOf(b);
+    if (i < 0 || j < 0) return;
+    const [x1, y1] = pt(i), [x2, y2] = pt(j);
+    edges += `<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="#b9534a" stroke-width="1.4" stroke-opacity=".55"/>`;
+  });
+  let nodes = '';
+  active.forEach((id, i) => {
+    const [x, y] = pt(i), c = fill[cls(id)];
+    nodes += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="7" fill="${c}" stroke="#241f19" stroke-width="1.2"/>` +
+      `<text x="${(x + (x < cx ? -11 : 11)).toFixed(1)}" y="${(y + 4).toFixed(1)}" font-size="12" font-family="'JetBrains Mono',monospace" fill="#241f19" text-anchor="${x < cx ? 'end' : 'start'}">${esc(short(id))}</text>`;
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="attack graph">${edges}${nodes}</svg>`;
+}
+
+function afBlock(af) {
+  const row = (label, ids, klass, note) =>
+    `<div class="acc ${klass}"><b>${label}</b> <span class="muted small">${note}</span><div>` +
+    (ids.length ? ids.map((x) => `<code class="tok">${esc(short(x))}</code>`).join(' · ') : '—') +
+    `</div></div>`;
+  return `<div class="fieldlabel">Argumentation · acceptance under the disagreement</div>` +
+    svgAttackGraph(LAST.active, af) +
+    `<div class="accept">` +
+    row('skeptical', af.skeptical, 'necessary', 'in every coherent position — cannot be rationally given up') +
+    row('contested', af.credulous.filter((x) => !af.skeptical.includes(x)), 'contested', 'defensible, but some position rejects it') +
+    row('defeated', af.defeated, 'defeated', 'no coherent position keeps it') +
+    `</div><p class="small muted">Dung AF with attack = co-membership in an irreducible disagreement. Under exactly that relation a set is conflict-free iff consistent, so the preferred/stable extensions <em>are</em> the coherent positions above — this is their faithful reading, not a separate claim.</p>`;
+}
+
+// Increment C — the forkable trajectory tree. A branch is a snapshot of
+// the whole world-model (engine.export_state, guaranteed round-trip).
+// Fork = save here; switch = load a snapshot; compare = two summaries +
+// the claim-set delta, side by side. Persisted so a trajectory survives
+// reload. The engine owns (de)serialization; the tree lives here.
+const LSKEY = 'wmt.tree.v2';
+let TREE = (() => { try { return JSON.parse(localStorage.getItem(LSKEY)) || { nodes: [], seq: 0 }; } catch (_) { return { nodes: [], seq: 0 }; } })();
+let CUR = null;       // id of the branch the live engine was loaded from
+let SEL = [];         // up to two node ids selected for compare
+let LAST = { active: [], summary: null };
+const persist = () => { try { localStorage.setItem(LSKEY, JSON.stringify(TREE)); } catch (_) {} };
+const nodeOf = (id) => TREE.nodes.find((x) => x.id === id);
+function depthOf(id) { let d = 0, p = nodeOf(id); while (p && p.parent) { d++; p = nodeOf(p.parent); } return d; }
+
+function claimsOfState(state) {
+  try { return (JSON.parse(state).claims || []); } catch (_) { return []; }
+}
+function claimDelta(sa, sb) {
+  const A = new Map(claimsOfState(sa).map((c) => [c.id, JSON.stringify(c.formula) + '|' + (c.active !== false)]));
+  const B = new Map(claimsOfState(sb).map((c) => [c.id, JSON.stringify(c.formula) + '|' + (c.active !== false)]));
+  const onlyA = [], onlyB = [], changed = [];
+  for (const k of A.keys()) (B.has(k) ? (A.get(k) !== B.get(k) && changed.push(k)) : onlyA.push(k));
+  for (const k of B.keys()) if (!A.has(k)) onlyB.push(k);
+  return { onlyA, onlyB, changed };
+}
+
+function saveBranch(name) {
+  const id = 'b' + TREE.seq++;
+  TREE.nodes.push({
+    id, name: name || `branch ${TREE.seq}`, parent: CUR,
+    ts: Date.now(), state: engine.export_state(), summary: LAST.summary,
+  });
+  CUR = id; persist(); renderTree();
+}
+async function switchTo(id) {
+  const nd = nodeOf(id); if (!nd) return;
+  JSON.parse(engine.import_state(nd.state));
+  CUR = id; SEL = []; await refresh();
+}
+function delBranch(id) {
+  TREE.nodes = TREE.nodes.filter((x) => x.id !== id);
+  TREE.nodes.forEach((x) => { if (x.parent === id) x.parent = null; });
+  if (CUR === id) CUR = null;
+  SEL = SEL.filter((x) => x !== id);
+  persist(); renderTree();
+}
+const sumChip = (s) => s
+  ? `<span class="bchip ${s.status}">${s.status}${s.status === 'inconsistent' ? ` · ${s.conflicts} conflict${s.conflicts === 1 ? '' : 's'} · ${s.positions} pos` : ` · ${s.kept} claims`}</span>`
+  : `<span class="bchip muted">unanalyzed</span>`;
+
+function renderTree() {
+  const box = document.querySelector('#branches');
+  if (!box) return;
+  if (!TREE.nodes.length) {
+    box.innerHTML = '<p class="muted small">No branches yet. Get to a state worth keeping, then “Save this state as a branch”. Fork it, change a claim, save again — compare the two.</p>';
+    document.querySelector('#cmp').innerHTML = '';
+    return;
+  }
+  box.innerHTML = TREE.nodes.map((nd) => {
+    const sel = SEL.includes(nd.id);
+    return `<div class="bnode${nd.id === CUR ? ' cur' : ''}${sel ? ' sel' : ''}" style="margin-left:${depthOf(nd.id) * 16}px">` +
+      `<div class="brow"><b>${esc(nd.name)}</b> ${sumChip(nd.summary)}${nd.id === CUR ? '<span class="bchip cur">loaded</span>' : ''}</div>` +
+      `<div class="bact">` +
+      `<button class="btn tiny" data-b="load" data-id="${nd.id}">switch to</button>` +
+      `<button class="btn tiny ghost" data-b="cmp" data-id="${nd.id}">${sel ? '✓ compare' : 'compare'}</button>` +
+      `<button class="btn tiny ghost" data-b="del" data-id="${nd.id}">×</button>` +
+      `</div></div>`;
+  }).join('');
+  box.querySelectorAll('button[data-b]').forEach((btn) => btn.onclick = () => {
+    const { b, id } = btn.dataset;
+    if (b === 'load') switchTo(id);
+    else if (b === 'del') delBranch(id);
+    else {
+      SEL = SEL.includes(id) ? SEL.filter((x) => x !== id) : [...SEL, id].slice(-2);
+      renderTree(); renderCompare();
+    }
+  });
+  renderCompare();
+}
+
+function renderCompare() {
+  const out = document.querySelector('#cmp'); if (!out) return;
+  if (SEL.length !== 2) { out.innerHTML = SEL.length === 1 ? '<p class="muted small">Select one more branch to compare.</p>' : ''; return; }
+  const [a, b] = SEL.map(nodeOf);
+  if (!a || !b) { out.innerHTML = ''; return; }
+  const col = (nd) => {
+    const s = nd.summary;
+    return `<div class="cmpcol"><h4>${esc(nd.name)}</h4>${sumChip(s)}` +
+      (s ? `<ul class="small">` +
+        `<li>skeptical: ${s.skeptical.map((x) => `<code class="tok">${esc(short(x))}</code>`).join(' ') || '—'}</li>` +
+        `<li>contested: ${s.contested.map((x) => `<code class="tok">${esc(short(x))}</code>`).join(' ') || '—'}</li>` +
+        `<li>defeated: ${s.defeated.map((x) => `<code class="tok">${esc(short(x))}</code>`).join(' ') || '—'}</li>` +
+        `</ul>` : '<p class="small muted">no analysis captured</p>') + `</div>`;
+  };
+  const d = claimDelta(a.state, b.state);
+  const list = (t, xs) => `<div><b>${t}</b> ${xs.length ? xs.map((x) => `<code class="tok">${esc(short(x))}</code>`).join(' · ') : '—'}</div>`;
+  out.innerHTML = `<div class="fieldlabel">Branch compare</div><div class="cmpgrid">${col(a)}${col(b)}</div>` +
+    `<div class="cmpdelta">` +
+    list(`only in ${esc(a.name)}:`, d.onlyA) +
+    list(`only in ${esc(b.name)}:`, d.onlyB) +
+    list('reformulated / toggled between them:', d.changed) +
+    `</div>`;
+}
+
 async function forced() {
   // probe 0-ary propositions AND ground atoms (predicates on declared
   // constants) — "you never asserted this but are committed to it".
@@ -175,9 +328,12 @@ async function refresh() {
   const status = $('#status'), field = $('#field');
   if (!z3ok) { status.className = 'statusbar warn'; status.innerHTML = '<span>Z3 not loaded</span>'; return; }
   const active = META.claims.filter((c) => c.active).map((c) => c.id);
+  LAST.active = active;
   if (!active.length) {
     status.className = 'statusbar muted';
-    status.innerHTML = '<span>no active claims</span>'; field.innerHTML = ''; return;
+    status.innerHTML = '<span>no active claims</span>'; field.innerHTML = '';
+    LAST.summary = { status: 'empty', kept: 0, conflicts: 0, positions: 0, skeptical: [], contested: [], defeated: [] };
+    return;
   }
   status.className = 'statusbar muted';
   status.innerHTML = '<span class="spin"></span><span>analyzing the trajectory with Z3…</span>';
@@ -205,12 +361,16 @@ async function refresh() {
   if (drv.status === 'unknown') {
     status.className = 'statusbar warn';
     status.innerHTML = '<span class="big">unknown</span><span>Z3 is undecided on this fragment — <b>not</b> assumed consistent. Try a less heavily-quantified formalization.</span>';
+    LAST.summary = { status: 'unknown', kept: active.length, conflicts: 0, positions: 0, skeptical: [], contested: [], defeated: [] };
+    renderTree();
     return;
   }
   if (lat.consistent || drv.status === 'consistent') {
     status.className = 'statusbar ok';
     status.innerHTML = '<span class="big">coherent</span><span>every active claim holds together — one position: all of them.</span>';
     field.innerHTML = await forced();
+    LAST.summary = { status: 'coherent', kept: active.length, conflicts: 0, positions: 1, skeptical: active.slice(), contested: [], defeated: [] };
+    renderTree();
     return;
   }
 
@@ -247,7 +407,21 @@ async function refresh() {
   } else {
     html += `<div class="mus"><b>minimal conflict:</b> ${(drv.mus || []).map((x) => `<code class="tok">${esc(short(x))}</code>`).join(' · ')}</div>`;
   }
+
+  const af = lat.af || { attacks: [], skeptical: [], credulous: [], defeated: [] };
+  if (!lat.capped) html += afBlock(af);
+  const contested = af.credulous.filter((x) => !af.skeptical.includes(x));
+  LAST.summary = {
+    status: 'inconsistent',
+    kept: active.length,
+    conflicts: lat.capped ? 1 : lat.mus.length,
+    positions: lat.capped ? 0 : lat.mss.length,
+    skeptical: af.skeptical.slice(),
+    contested,
+    defeated: af.defeated.slice(),
+  };
   field.innerHTML = html;
+  renderTree();
 
   $('#applyrep')?.addEventListener('click', () => { drop.forEach((id) => engine.retract(id)); refresh(); });
   field.querySelectorAll('button[data-pos]').forEach((b) => b.onclick = () => {
@@ -270,6 +444,11 @@ function wire() {
     if (r.ok) { $('#json').value = ''; }
     refresh();
   };
+  $('#savebranch').onclick = () => {
+    const nm = ($('#branchname').value || '').trim();
+    saveBranch(nm); $('#branchname').value = '';
+  };
+  renderTree();
 }
 
 boot();

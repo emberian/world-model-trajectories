@@ -43,7 +43,7 @@ await page.click('#ingest');
 await page.waitForFunction(() => /inconsistent/i.test(document.querySelector('#status')?.textContent || ''), null, { timeout: 90000 }).catch(() => fail('did not reach "inconsistent" after adding pen_nofly'));
 
 const field = await page.$eval('#field', (e) => e.innerHTML);
-const hasSvg = (await page.$$('#field svg')).length === 1;
+const hasSvg = (await page.$$('#field svg')).length >= 1;
 if (!hasSvg) fail('no conflict SVG rendered');
 if (!/Position\s*A/.test(field)) fail('no Position cards rendered');
 if (!/irreducible disagreement|conflict 1/.test(field)) fail('no irreducible-disagreement listing');
@@ -54,10 +54,41 @@ const colored = await page.$$eval('#claims .claim', (els) =>
 if (colored < 4) fail('claims not dialectically coloured, got ' + colored);
 console.log('· inconsistent: SVG + positions + disagreements + optimal repair + coloured claims');
 
-// 3. adopt the optimal repair → back to coherent
+// 3. argumentation-framework view (Increment B): attack graph + acceptance
+{
+  const svgs = (await page.$$('#field svg')).length;
+  if (svgs < 2) fail('expected conflict SVG + attack-graph SVG, got ' + svgs);
+  const f = await page.$eval('#field', (e) => e.textContent);
+  if (!/Argumentation/.test(f)) fail('no argumentation section');
+  if (!/skeptical/.test(f) || !/contested/.test(f) || !/defeated/.test(f)) fail('no acceptance summary');
+  if (!/Dung/.test(f)) fail('argumentation honesty note missing');
+}
+console.log('· argumentation: attack graph + skeptical/contested/defeated + honest Dung note');
+
+// 4. forkable trajectory tree (Increment C): save this (inconsistent)
+//    state as a branch, deterministic from a cleared tree.
+await page.evaluate(() => { try { localStorage.removeItem('wmt.tree.v2'); } catch (_) {} });
+await page.fill('#branchname', 'in-conflict');
+await page.click('#savebranch');
+await page.waitForFunction(() => document.querySelectorAll('#branches .bnode').length === 1, null, { timeout: 5000 }).catch(() => fail('branch was not saved'));
+
+// 5. adopt the optimal repair → back to coherent
 await page.click('#applyrep');
 await page.waitForFunction(() => /coherent/i.test(document.querySelector('#status')?.textContent || ''), null, { timeout: 90000 }).catch(() => fail('optimal-repair did not restore coherence'));
 console.log('· optimal repair restores coherence');
+
+// 6. save the repaired state, then compare the two branches side by side
+await page.fill('#branchname', 'repaired');
+await page.click('#savebranch');
+await page.waitForFunction(() => document.querySelectorAll('#branches .bnode').length === 2, null, { timeout: 5000 }).catch(() => fail('second branch was not saved'));
+await page.$$eval('#branches button[data-b="cmp"]', (bs) => bs.forEach((b) => b.click()));
+{
+  const cmp = await page.$eval('#cmp', (e) => e.textContent);
+  if (!/Branch compare/.test(cmp)) fail('compare view did not render');
+  if (!/inconsistent/.test(cmp) || !/coherent/.test(cmp)) fail('compare did not contrast the two branch summaries: ' + cmp.slice(0, 160));
+  if (!/only in|reformulated|toggled/.test(cmp)) fail('compare did not show a claim-set delta');
+}
+console.log('· trajectory tree: fork + switch + side-by-side branch compare');
 
 if (errs.length) fail('console/page errors:\n' + errs.join('\n'));
 console.log('PASS — full real-browser stack verified (wasm core + Z3-wasm + DOM + lattice)');
