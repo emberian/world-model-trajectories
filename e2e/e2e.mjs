@@ -90,7 +90,22 @@ await page.$$eval('#branches button[data-b="cmp"]', (bs) => bs.forEach((b) => b.
 }
 console.log('· trajectory tree: fork + switch + side-by-side branch compare');
 
+// 7. OpenRouter auto-formalize seam present, and the key-less path is
+//    honest: it surfaces a clear message and makes NO network call.
+//    (The live LLM round-trip is the external seam — deliberately not
+//    asserted here; it needs a real key + service.)
+await page.evaluate(() => { document.querySelector('#loop').open = true; });
+if (!(await page.$('#autoform'))) fail('auto-formalize control missing');
+let netHit = false;
+page.on('request', (rq) => { if (/openrouter\.ai/.test(rq.url())) netHit = true; });
+await page.fill('#orkey', '');
+await page.fill('#nl', 'Some claim.');
+await page.click('#autoform');
+await page.waitForFunction(() => /OpenRouter API key/.test(document.querySelector('#orstat')?.textContent || ''), null, { timeout: 5000 }).catch(() => fail('key-less auto-formalize did not surface an honest error'));
+if (netHit) fail('key-less auto-formalize must not call OpenRouter');
+console.log('· auto-formalize: present; key-less path honest and offline');
+
 if (errs.length) fail('console/page errors:\n' + errs.join('\n'));
-console.log('PASS — full real-browser stack verified (wasm core + Z3-wasm + DOM + lattice)');
+console.log('PASS — full real-browser stack verified (wasm core + Z3-wasm + DOM + lattice + seam)');
 await browser.close();
 process.exit(0);

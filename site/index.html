@@ -76,8 +76,23 @@
   <details class="loop" id="loop">
     <summary>Add a claim — the formalization loop</summary>
     <div class="body">
+      <div style="grid-column:1/-1">
+        <div class="step">Step 0 · optional — auto-formalize (OpenRouter, your key)</div>
+        <p class="muted small" style="margin:var(--s2) 0">
+          No manual round-trip: your model formalizes, the engine ingests, Z3 analyzes — in one click.
+          <b>This is the one path where data leaves the tab</b>: your sentences and the current
+          vocabulary are sent to OpenRouter under <em>your</em> key (stored only in this browser).
+          The same honest seam still holds — you confirm each plain-English render; nothing is taken on faith.
+        </p>
+        <div class="cta" style="margin-top:var(--s2);align-items:center">
+          <input id="orkey" type="password" placeholder="sk-or-… (OpenRouter API key)" autocomplete="off" />
+          <input id="ormodel" placeholder="model, e.g. anthropic/claude-sonnet-4" />
+          <button class="btn sm" id="autoform">Auto-formalize &amp; analyze</button>
+          <span id="orstat" class="muted small"></span>
+        </div>
+      </div>
       <div>
-        <div class="step">Step 1 · formalize with your LLM</div>
+        <div class="step">Step 1 · or formalize by hand with any LLM</div>
         <textarea id="nl" placeholder="A penguin cannot fly.&#10;Every penguin is a bird."></textarea>
         <div class="cta" style="margin-top:var(--s3)">
           <button class="btn sm" id="mkprompt">Build prompt</button>
@@ -134,7 +149,7 @@
     world-model-trajectories · built for a question from
     <a href="https://twitter.com/bananawalnutz">@bananawalnutz</a> ·
     a sibling of <a href="https://github.com/emberian">stella / svenvs</a> ·
-    MIT/Apache-2.0 · Z3 © Microsoft (MIT). Everything runs locally; nothing leaves the tab.
+    MIT/Apache-2.0 · Z3 © Microsoft (MIT). Solving runs locally; the only data that leaves the tab is when you opt into Step&nbsp;0 (your sentences → OpenRouter, under your key).
   </div>
 </footer>
 

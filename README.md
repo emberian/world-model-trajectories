@@ -134,6 +134,17 @@ honest UX of the seam.
   won the race; CI's slower Chromium failed correctly; fixed by
   capturing the summary synchronously. In the commit history, not
   hidden.
+- **Optional auto-formalize (OpenRouter, bring-your-own-key)** closes
+  the no-manual-intervention gap: your model formalizes, the engine
+  ingests, Z3 analyzes, in one click. It does *not* weaken the seam —
+  the model still only proposes the typed IR, the engine still compiles
+  & type-checks it, and you still confirm the English render. It is the
+  one path where data leaves the tab (your sentences + vocabulary →
+  OpenRouter, under your key, stored only in `localStorage`), stated
+  in-product. The e2e asserts the control exists and that the key-less
+  path is honest and makes **no** network call; the live LLM round-trip
+  is the external seam and is deliberately *not* claimed as
+  CI-verified — it depends on a third-party service and your key.
 
 First load fetches ~34&nbsp;MB of Z3 wasm, then it is cached. Everything
 runs locally in the tab; nothing is sent anywhere.

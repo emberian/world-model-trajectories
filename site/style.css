@@ -154,6 +154,8 @@ code.tok{background:color-mix(in oklab,var(--ink) 7%,transparent);padding:1px 5p
 .loop .body{padding:0 var(--s5) var(--s5);display:grid;grid-template-columns:1fr 1fr;gap:var(--s5)}
 @media(max-width:820px){.loop .body{grid-template-columns:1fr}}
 .step{font-family:var(--mono);font-size:.72rem;letter-spacing:.13em;text-transform:uppercase;color:var(--bark)}
+.loop input{font-family:var(--mono);font-size:.8rem;padding:7px 11px;border-radius:7px;
+  border:1px solid var(--line2);background:#fffdf5;color:var(--ink);min-width:220px;flex:1}
 textarea{width:100%;font-family:var(--mono);font-size:.8rem;background:#fffdf5;color:var(--ink);
   border:1px solid var(--line2);border-radius:var(--r2);padding:10px;resize:vertical;min-height:120px;margin-top:var(--s2)}
 .errbox{font-family:var(--mono);font-size:.78rem;white-space:pre-wrap;

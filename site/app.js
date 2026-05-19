@@ -433,8 +433,86 @@ async function refresh() {
   });
 }
 
+// Optional auto-formalize seam: OpenRouter, bring-your-own-key. This is
+// the ONLY path that sends data off the tab — explicitly opt-in, the
+// user's key, stored only in localStorage. It does not weaken the honest
+// seam: the model still only proposes the typed IR; the engine still
+// compiles & checks it; the human still confirms the English render.
+const OR = 'wmt.or.v1';
+function loadOR() {
+  try { return JSON.parse(localStorage.getItem(OR)) || {}; } catch (_) { return {}; }
+}
+function saveOR(k, m) {
+  try { localStorage.setItem(OR, JSON.stringify({ k, m })); } catch (_) {}
+}
+// Robust: models sometimes wrap JSON in prose/fences despite instruction.
+function extractJSON(text) {
+  const a = text.indexOf('{'), b = text.lastIndexOf('}');
+  if (a < 0 || b <= a) throw new Error('no JSON object in the model reply');
+  return text.slice(a, b + 1);
+}
+async function autoFormalize() {
+  const key = ($('#orkey').value || '').trim();
+  const model = ($('#ormodel').value || '').trim() || 'anthropic/claude-sonnet-4';
+  const nl = ($('#nl').value || '').trim();
+  const stat = $('#orstat'), errs = $('#errs');
+  errs.innerHTML = '';
+  if (!key) { stat.textContent = 'need an OpenRouter API key'; return; }
+  if (!nl) { stat.textContent = 'enter a claim in Step 1 first'; return; }
+  saveOR(key, model);
+  stat.innerHTML = `formalizing with ${esc(model)} <span class="spin"></span>`;
+  const prompt = engine.prompt(nl);
+  let reply;
+  try {
+    const r = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + key,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': location.origin,
+        'X-Title': 'world-model-trajectories',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0,
+      }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error((j.error && (j.error.message || JSON.stringify(j.error))) || ('HTTP ' + r.status));
+    reply = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
+    if (!reply) throw new Error('empty reply: ' + JSON.stringify(j).slice(0, 300));
+  } catch (e) {
+    stat.textContent = '';
+    errs.innerHTML = '<div class="errbox">OpenRouter: ' + esc(e.message || e) + '</div>';
+    return;
+  }
+  // Surface what the model produced (the seam stays visible, not hidden).
+  let ir;
+  try { ir = extractJSON(reply); } catch (e) {
+    stat.textContent = '';
+    $('#json').value = reply;
+    errs.innerHTML = '<div class="errbox">model did not return parseable IR JSON (' + esc(e.message) + ') — its raw reply is in Step 2 for you to inspect/fix</div>';
+    return;
+  }
+  $('#json').value = ir;
+  let res;
+  try { res = JSON.parse(engine.ingest(ir)); }
+  catch (e) { stat.textContent = ''; errs.innerHTML = '<div class="errbox">engine error: ' + esc(e) + '</div>'; return; }
+  if (!res.ok) {
+    stat.textContent = 'IR rejected — see errors (raw IR kept in Step 2)';
+    errs.innerHTML = '<div class="errbox">' + res.errors.map(esc).join('\n') + '</div>';
+    return;
+  }
+  stat.textContent = 'formalized & ingested — confirm the English renders below';
+  $('#json').value = '';
+  refresh();
+}
+
 function wire() {
   $('#seed').onclick = () => { engine.seed_demo(); refresh(); };
+  { const s = loadOR(); if (s.k) $('#orkey').value = s.k; if (s.m) $('#ormodel').value = s.m; }
+  $('#autoform').onclick = autoFormalize;
   $('#mkprompt').onclick = () => { $('#prompt').value = engine.prompt($('#nl').value || ''); };
   $('#copy').onclick = async () => {
     try { await navigator.clipboard.writeText($('#prompt').value); $('#copy').textContent = 'Copied'; setTimeout(() => ($('#copy').textContent = 'Copy'), 1200); }
