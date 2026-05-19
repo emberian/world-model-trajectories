@@ -368,9 +368,13 @@ async function refresh() {
   if (lat.consistent || drv.status === 'consistent') {
     status.className = 'statusbar ok';
     status.innerHTML = '<span class="big">coherent</span><span>every active claim holds together — one position: all of them.</span>';
-    field.innerHTML = await forced();
+    // Capture the summary + render the tree *synchronously*, before the
+    // async forced() — otherwise a save triggered the instant the status
+    // text flips to "coherent" snapshots the stale (pre-repair) summary.
+    // (The real-browser e2e on slower CI Chromium caught exactly this.)
     LAST.summary = { status: 'coherent', kept: active.length, conflicts: 0, positions: 1, skeptical: active.slice(), contested: [], defeated: [] };
     renderTree();
+    field.innerHTML = await forced();
     return;
   }
 
